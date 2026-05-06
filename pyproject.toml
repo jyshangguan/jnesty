@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "jnesty"
+version = "0.1.0"
+description = "GPU-accelerated random walk nested sampling with JAX"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "numpy",
+    "matplotlib",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dynesty = ["dynesty"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
