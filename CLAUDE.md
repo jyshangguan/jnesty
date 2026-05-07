@@ -21,12 +21,25 @@ src/jnesty/
 Important files:
 
 ```text
-src/jnesty/api.py                 # Public NestedSampler API
-src/jnesty/while_loop_sampler.py  # Core JAX while_loop sampler
-src/jnesty/plotting.py            # Dynesty-style plotting helpers
-src/jnesty/sampler.py             # Sampler internals
-src/jnesty/bounding.py            # Bounding methods
 src/jnesty/__init__.py            # Public imports
+src/jnesty/jnesty.py              # Public NestedSampler API (thin wrapper)
+src/jnesty/sampler.py             # Core NS loop (delegates to Bound + InternalSampler)
+src/jnesty/internal_samplers.py   # Proposal strategies (RWalkSampler, future: SliceSampler)
+src/jnesty/bounding.py            # Bound base class + UnitCube, SingleEllipsoid, MultiEllipsoid
+src/jnesty/multi_ellipsoid.py     # JIT-compiled multi-ellipsoid fitting core
+src/jnesty/results.py             # Results class + format_results()
+src/jnesty/utils.py               # Shared utilities (randsphere, logsubexp, etc.)
+src/jnesty/plotting.py            # Dynesty-style plotting helpers
+```
+
+Architecture follows Dynesty's separation of concerns:
+
+```text
+NestedSampler (jnesty.py)       # User-facing API
+  └─> run_nested_sampling (sampler.py)   # Core NS loop
+        ├─> Bound (bounding.py)          # Pluggable bounding methods
+        └─> InternalSampler (internal_samplers.py)  # Pluggable proposal strategies
+  └─> format_results (results.py)        # Raw result -> Results object
 ```
 
 Demo and development files:

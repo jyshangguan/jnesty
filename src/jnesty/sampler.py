@@ -1,232 +1,489 @@
 """
-GPU-accelerated random walk nested sampling implementation.
+Core nested sampling loop.
 
-This provides a traditional nested sampling implementation with GPU-accelerated
-random walk sampling using JAX compilation for maximum performance.
+Provides the NestedSamplingLoop class that manages the NS iteration:
+live points, evidence accumulation, convergence checking.
+Delegates point proposal to InternalSampler and bounding to Bound.
 
-CORRECTNESS FIX (v2.1):
-- Uses standard nested sampling evidence accumulation
-- Proper information H calculation
-- Correct likelihood-constrained sampling
+Returns raw WhileLoopNSResult for formatting by results.py.
 """
+
+import time
+from typing import Optional, NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax import random, lax
-from typing import Optional, NamedTuple, Union
-import time
+
+from .internal_samplers import RWalkSampler
+from .utils import logsubexp
+
+# Import for progress tracking
+try:
+    from jax.experimental import io_callback
+    from tqdm.auto import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm = None
 
 
-class NSConfig(NamedTuple):
-    """Configuration for nested sampling run."""
+class WhileLoopNSConfig(NamedTuple):
+    """Configuration for the nested sampling run."""
     nlive: int = 500
-    max_iterations: Optional[int] = 10000  # Increased for better convergence
-    rwalk_K: int = 64
-    rwalk_L: int = 16
-    rwalk_step_scale: float = 0.5
-    delta_logZ_threshold: float = 0.01  # Standard 1% evidence uncertainty threshold
+    max_iterations: int = 10000
+    delta_logZ_threshold: float = 0.01
+    rwalk_K: int = 25
+    rwalk_step_scale: float = 1.0
+    target_acceptance: float = 0.5
+    prior_bounds: Optional[jnp.ndarray] = None
     verbose: bool = True
+    print_progress: bool = True
+    bound: str = 'none'
+    bound_update_interval: int = 0
+    max_ellipsoids: int = 20
 
 
-class NSResult(NamedTuple):
-    """Results from nested sampling run."""
+class WhileLoopNSResult(NamedTuple):
+    """Raw results from the nested sampling loop."""
     logZ: float
     logZ_error: float
     H: float
-    delta_logZ: float  # Estimated remaining evidence contribution (at final iteration)
+    delta_logZ: float
     n_iterations: int
     runtime: float
     samples: jnp.ndarray
     logL_samples: jnp.ndarray
+    delta_logZ_trajectory: jnp.ndarray
+    scale_trajectory: jnp.ndarray
     acceptance_rate: float
-    delta_logZ_samples: jnp.ndarray  # Track delta_logZ over time (for convergence analysis)
+    live_x: jnp.ndarray = None
+    live_logL: jnp.ndarray = None
 
 
-def run_nested_sampling(loglikelihood_fn, prior_sample_fn, ndim: int,
-                       config: NSConfig, key: Optional = None):
-    """Run nested sampling with GPU-accelerated compiled implementation."""
-    # Handle backward compatibility
-    if hasattr(config, 'rwalk_config') and config.rwalk_config is not None:
-        rwalk_config = config.rwalk_config
-        rwalk_K = getattr(rwalk_config, 'K', config.rwalk_K)
-        rwalk_L = getattr(rwalk_config, 'L', config.rwalk_L)
-        rwalk_step_scale = getattr(rwalk_config, 'step_scale', config.rwalk_step_scale)
-    else:
-        rwalk_K = config.rwalk_K
-        rwalk_L = config.rwalk_L
-        rwalk_step_scale = config.rwalk_step_scale
+def run_nested_sampling(
+    loglikelihood_fn,
+    prior_sample_fn,
+    ndim,
+    config,
+    key=None,
+    prior_transform_fn=None,
+):
+    """
+    Run nested sampling with iteration-granular adaptive termination.
 
+    Uses Bound and InternalSampler objects for pluggable strategies.
+    The core loop uses lax.while_loop for exact convergence stopping.
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        Log-likelihood function (physical space).
+    prior_sample_fn : callable
+        Prior sampling function (returns unit cube samples).
+    ndim : int
+        Problem dimensionality.
+    config : WhileLoopNSConfig
+        Run configuration.
+    key : jax.random.PRNGKey, optional
+    prior_transform_fn : callable, optional
+
+    Returns
+    -------
+    WhileLoopNSResult
+    """
     if key is None:
         key = random.PRNGKey(42)
 
     nlive = config.nlive
-    max_iterations = config.max_iterations if config.max_iterations else 1000
+    max_iterations = config.max_iterations
+    delta_logZ_threshold = config.delta_logZ_threshold
+    rwalk_K = config.rwalk_K
 
-    def single_iteration(carry, iteration):
-        """Single NS iteration."""
-        live_x, live_logL, logL_samples, worst_logL_samples, logZ, delta_logZ_samples, carry_key = carry
+    # Wrap likelihood with prior_transform if needed
+    if prior_transform_fn is not None:
+        def loglikelihood_wrapped(x):
+            return loglikelihood_fn(prior_transform_fn(x))
+        loglikelihood_for_jit = loglikelihood_wrapped
+    else:
+        loglikelihood_for_jit = loglikelihood_fn
+
+    if config.verbose:
+        print("=" * 70)
+        print("JNesty Nested Sampling")
+        print("=" * 70)
+        print(f"Live points: {nlive}")
+        print(f"Max iterations: {max_iterations}")
+        print(f"Convergence threshold: delta_logZ < {delta_logZ_threshold}")
+        print(f"Bound: {config.bound}")
+        print(f"Walk steps: {rwalk_K}")
+        if config.bound == 'multi':
+            print(f"Max ellipsoids: {config.max_ellipsoids}")
+            print(f"Bound update interval: {config.bound_update_interval}")
+        print("=" * 70)
+        print()
+
+    start_time = time.time()
+
+    # Initialize live points from prior
+    keys = random.split(key, nlive + 1)
+    live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
+    live_logL = jnp.vectorize(loglikelihood_for_jit, signature='(n)->()')(live_x)
+
+    # Create bound and sampler via factories
+    from .bounding import get_bound
+    from .internal_samplers import get_sampler
+
+    bound_obj = get_bound(config.bound, ndim,
+                          max_ellipsoids=config.max_ellipsoids,
+                          scale=config.rwalk_step_scale)
+    sampler_obj = get_sampler('rwalk', ndim,
+                              target_acceptance=config.target_acceptance)
+
+    # Fit initial bound
+    if config.bound != 'none':
+        if prior_transform_fn is not None:
+            live_physical = jnp.stack([prior_transform_fn(x) for x in live_x])
+            bound_obj.fit(live_physical)
+        else:
+            bound_obj.fit(live_x)
+
+    # Compile-time flags
+    use_multi_ellipsoid = config.bound == 'multi'
+    bound_update_interval = config.bound_update_interval
+    use_chunked_loop = use_multi_ellipsoid and bound_update_interval > 0
+    max_ellipsoids = config.max_ellipsoids
+
+    # Pre-allocate buffers
+    worst_x_buffer = jnp.zeros((max_iterations, ndim))
+    worst_logL_buffer = jnp.full(max_iterations, -jnp.inf)
+    delta_logZ_buffer = jnp.full(max_iterations, jnp.inf)
+    scale_buffer = jnp.full(max_iterations, jnp.inf)
+
+    # Initial state
+    logZ = -jnp.inf
+    current_scale = config.rwalk_step_scale
+    acceptance_count = 0
+    total_proposals = 0
+
+    max_live_logL = jnp.max(live_logL)
+    delta_logZ = jax.scipy.special.logsumexp(
+        jnp.array([0.0, max_live_logL - logZ])
+    )
+
+    # Get initial axes and schedule
+    bound_axes = bound_obj.get_axes()
+    if use_multi_ellipsoid and hasattr(bound_obj, 'get_walk_schedule'):
+        walk_schedule = bound_obj.get_walk_schedule(rwalk_K)
+    else:
+        walk_schedule = jnp.zeros(rwalk_K, dtype=jnp.int32)
+
+    # For multi-ellipsoid: store state arrays for chunked updates
+    if use_multi_ellipsoid and hasattr(bound_obj, 'state') and bound_obj.state is not None:
+        me_axes = bound_obj.state.axes
+        me_logvol_ells = bound_obj.state.logvol_ells
+    else:
+        me_axes = jnp.zeros((max_ellipsoids, ndim, ndim))
+        me_logvol_ells = jnp.full(max_ellipsoids, -jnp.inf)
+
+    has_prior_bounds = config.prior_bounds is not None
+
+    # Pack state as tuple for lax.while_loop
+    init_state = (
+        live_x,                  # 0
+        live_logL,               # 1
+        worst_x_buffer,          # 2
+        worst_logL_buffer,       # 3
+        delta_logZ_buffer,       # 4
+        scale_buffer,            # 5
+        logZ,                    # 6
+        delta_logZ,              # 7
+        jnp.array(0),            # 8  iteration
+        keys[-1],                # 9  key
+        current_scale,           # 10 scale
+        acceptance_count,        # 11 acc_count
+        total_proposals,         # 12 tot_proposals
+        bound_axes,              # 13 bound_axes
+        walk_schedule,           # 14 walk_schedule
+        me_axes,                 # 15 me_axes
+        me_logvol_ells,          # 16 me_logvol_ells
+        jnp.array(0),            # 17 chunk_start
+    )
+
+    def cond_fn(state):
+        dlz = state[7]
+        it = state[8]
+        return (dlz >= delta_logZ_threshold) & (it < max_iterations)
+
+    def body_fn(state):
+        live_x = state[0]
+        live_logL = state[1]
+        logZ = state[6]
+        iteration = state[8]
+        key = state[9]
+        scale = state[10]
+        bound_axes = state[13]
+        schedule = state[14]
+        me_axes_state = state[15]
 
         # 1. Find worst live point
         worst_idx = jnp.argmin(live_logL)
         worst_logL = live_logL[worst_idx]
-        worst_x = live_x[worst_idx]
 
-        # 2. Generate replacement point using constrained random walk
-        carry_key, subkey = random.split(carry_key)
-
+        # 2. Pick random starting point
+        key, subkey = random.split(key)
         idx = random.randint(subkey, (), 0, live_x.shape[0])
-        x_start = live_x[idx]
+        x_current = live_x[idx]
 
-        carry_key, subkey2 = random.split(carry_key)
-        delta = random.normal(subkey2, shape=(ndim,)) * rwalk_step_scale
-        x_proposed = x_start + delta
+        # 3. Run random walk via sampler
+        key, walk_key = random.split(key)
 
-        logL_proposed = loglikelihood_fn(x_proposed)
+        if use_multi_ellipsoid:
+            ws = schedule
+            ba = me_axes_state
+        else:
+            ws = None
+            ba = bound_axes
 
-        # Constraint: must satisfy logL > worst_logL
-        constraint_satisfied = logL_proposed > worst_logL
+        x_new, logL_new, iter_acceptance = sampler_obj.sample(
+            walk_key, x_current, worst_logL, loglikelihood_for_jit,
+            ba, scale, rwalk_K,
+            prior_bounds=config.prior_bounds if has_prior_bounds else None,
+            walk_schedule=ws,
+        )
 
-        # Metropolis acceptance
-        log_accept_ratio = logL_proposed - worst_logL
-        metropolis_accept = jnp.log(random.uniform(subkey2)) < log_accept_ratio
+        # 4. Adaptive scale tuning
+        current_acceptance = iter_acceptance / rwalk_K
+        new_scale = sampler_obj.tune(scale, current_acceptance, ndim, iteration)
 
-        accept = constraint_satisfied & metropolis_accept
-
-        x_new = jnp.where(accept, x_proposed, worst_x)
-        logL_new = jnp.where(accept, logL_proposed, worst_logL)
-
-        # 3. Update live points
+        # 5. Update live points
         live_x_new = live_x.at[worst_idx].set(x_new)
         live_logL_new = live_logL.at[worst_idx].set(logL_new)
 
-        # 4. Update evidence (standard NS formula with shrinkage)
+        # 6. Update evidence
         logX_old = -iteration / nlive
-        logX_new = -(iteration + 1) / nlive
-        log_dX = jnp.log(jnp.exp(logX_old) - jnp.exp(logX_new))
+        logX_new_val = -(iteration + 1) / nlive
+        log_dX = logsubexp(logX_old, logX_new_val)
         log_dZ = worst_logL + log_dX
-
         logZ_new = jnp.logaddexp(logZ, log_dZ)
 
-        # 5. Calculate delta_logZ (remaining evidence estimate)
+        # 7. Calculate delta_logZ
         max_live_logL = jnp.max(live_logL_new)
         delta_logZ_new = jax.scipy.special.logsumexp(
-            jnp.array([0.0, max_live_logL + logX_new - logZ_new])
+            jnp.array([0.0, max_live_logL + logX_new_val - logZ_new])
         )
 
-        # 6. Store samples
-        logL_samples_new = logL_samples.at[iteration].set(worst_logL)
-        worst_logL_samples_new = worst_logL_samples.at[iteration].set(worst_logL)
-        delta_logZ_samples_new = delta_logZ_samples.at[iteration].set(delta_logZ_new)
+        # 8. Store samples in buffers
+        worst_x_buf_new = state[2].at[iteration].set(live_x[worst_idx])
+        worst_logL_buf_new = state[3].at[iteration].set(worst_logL)
+        dlz_buf_new = state[4].at[iteration].set(delta_logZ_new)
+        scale_buf_new = state[5].at[iteration].set(new_scale)
 
-        results = (worst_x, worst_logL, accept.astype(float), logZ_new, delta_logZ_new)
+        return (
+            live_x_new, live_logL_new,
+            worst_x_buf_new, worst_logL_buf_new,
+            dlz_buf_new, scale_buf_new,
+            logZ_new, delta_logZ_new,
+            iteration + 1, key, new_scale,
+            state[11] + iter_acceptance, state[12] + rwalk_K,
+            bound_axes, schedule,
+            me_axes_state, state[16],
+            state[17],
+        )
 
-        return (live_x_new, live_logL_new, logL_samples_new, worst_logL_samples_new, logZ_new, delta_logZ_samples_new, carry_key), results
+    # Execute loop
+    if use_chunked_loop:
+        from .multi_ellipsoid import fit_multi_ellipsoid
 
-    # Initialize live points
-    keys = random.split(key, nlive + 1)
-    live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
-    live_logL = jnp.vectorize(loglikelihood_fn, signature='(n)->()')(live_x)
+        current_state = init_state
+        total_done = 0
 
-    # Pre-allocate arrays for samples
-    logL_samples = jnp.full(max_iterations, -jnp.inf)
-    worst_logL_samples = jnp.full(max_iterations, -jnp.inf)
-    delta_logZ_samples = jnp.full(max_iterations, jnp.inf)
+        if config.print_progress and TQDM_AVAILABLE:
+            pbar = tqdm(total=max_iterations, desc="Nested Sampling")
 
-    # Initialize logZ and delta_logZ
-    logZ_init = -jnp.inf
+        def _progress_cb(it, dlz, lz):
+            if int(it) % 100 == 0:
+                pbar.n = int(it)
+                pbar.set_postfix_str(f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f}')
+                pbar.refresh()
 
-    init_state = (live_x, live_logL, logL_samples, worst_logL_samples, logZ_init, delta_logZ_samples, keys[-1])
+        _body_fn = body_fn
 
-    # Run NS loop
-    start_time = time.time()
-    final_state, results = lax.scan(
-        single_iteration,
-        init_state,
-        jnp.arange(max_iterations)
-    )
+        if config.print_progress and TQDM_AVAILABLE:
+            def body_fn_progress(state):
+                new_state = _body_fn(state)
+                try:
+                    io_callback(_progress_cb, None, new_state[8], new_state[7], new_state[6])
+                except Exception:
+                    pass
+                return new_state
+            body_fn_for_chunk = body_fn_progress
+        else:
+            body_fn_for_chunk = body_fn
+
+        def chunk_cond(state):
+            converged = state[7] < delta_logZ_threshold
+            too_many = state[8] >= max_iterations
+            chunk_done = (state[8] - state[17]) >= bound_update_interval
+            return (~converged) & (~too_many) & (~chunk_done)
+
+        compiled_chunk = jax.jit(lambda s: lax.while_loop(chunk_cond, body_fn_for_chunk, s))
+
+        while total_done < max_iterations:
+            state_with_chunk = (*current_state[:-1], jnp.array(total_done))
+            current_state = compiled_chunk(state_with_chunk)
+
+            iteration = int(current_state[8])
+            delta_logZ_val = float(current_state[7])
+            total_done = iteration
+
+            if delta_logZ_val < delta_logZ_threshold or total_done >= max_iterations:
+                break
+
+            # Refit multi-ellipsoid
+            live_x_cur = current_state[0]
+            me_state = fit_multi_ellipsoid(live_x_cur, max_ellipsoids=max_ellipsoids)
+
+            if config.verbose and total_done % (bound_update_interval * 5) < bound_update_interval:
+                print(f"  Iter {total_done}: refit multi-ellipsoid -> {me_state.n_active} ellipsoid(s), "
+                      f"logZ={float(current_state[6]):.2f}, dlogZ={delta_logZ_val:.3f}")
+
+            # Recompute walk schedule
+            _log_probs = me_state.logvol_ells - jax.scipy.special.logsumexp(me_state.logvol_ells)
+            _probs = jnp.exp(_log_probs)
+            def _sched_step(_acc, _):
+                _acc = _acc + _probs
+                _best = jnp.argmax(_acc)
+                _acc = _acc.at[_best].add(-1.0)
+                return _acc, _best
+            _, new_schedule = lax.scan(
+                _sched_step, jnp.zeros(max_ellipsoids), None, length=rwalk_K
+            )
+
+            # Repack with updated multi-ellipsoid state
+            current_state = (
+                current_state[0], current_state[1],
+                current_state[2], current_state[3],
+                current_state[4], current_state[5],
+                current_state[6], current_state[7],
+                current_state[8], current_state[9],
+                current_state[10], current_state[11],
+                current_state[12], current_state[13],
+                new_schedule,
+                me_state.axes, me_state.logvol_ells,
+                current_state[17],
+            )
+
+        if config.print_progress and TQDM_AVAILABLE:
+            pbar.close()
+
+        final_state = current_state
+
+    elif config.print_progress and TQDM_AVAILABLE:
+        pbar = tqdm(total=max_iterations, desc="Nested Sampling")
+
+        def progress_cb(it, dlz, lz):
+            if int(it) % 100 == 0:
+                pbar.n = int(it)
+                pbar.set_postfix_str(f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f}')
+                pbar.refresh()
+
+        _orig_body = body_fn
+
+        def body_fn_prog(state):
+            new_state = _orig_body(state)
+            try:
+                io_callback(progress_cb, None, new_state[8], new_state[7], new_state[6])
+            except Exception:
+                pass
+            return new_state
+
+        final_state = lax.while_loop(cond_fn, body_fn_prog, init_state)
+        pbar.close()
+    else:
+        final_state = lax.while_loop(cond_fn, body_fn, init_state)
+
+    # Unpack final state
+    live_x_final = final_state[0]
+    live_logL_final = final_state[1]
+    worst_x_buffer = final_state[2]
+    worst_logL_buffer = final_state[3]
+    delta_logZ_buffer = final_state[4]
+    scale_buffer = final_state[5]
+    delta_logZ_final = final_state[7]
+    iteration_final = final_state[8]
+    final_acceptance_count = final_state[11]
+    final_total_proposals = final_state[12]
+
+    if config.verbose:
+        print()
+
     runtime = time.time() - start_time
+    actual_iterations = iteration_final
 
-    # Unpack results
-    final_live_x, final_live_logL, final_logL_samples, final_worst_logL_samples, final_logZ, final_delta_logZ_samples, final_key = final_state
-    dead_x, dead_logL, accept_rates, final_logZ_trace, final_delta_logZ_trace = results
+    # Transform samples to physical space
+    if prior_transform_fn is not None:
+        samples = jnp.vectorize(prior_transform_fn, signature='(n)->(n)')(
+            worst_x_buffer[:actual_iterations]
+        )
+    else:
+        samples = worst_x_buffer[:actual_iterations]
 
-    # Compute evidence and information using standard NS formulas
-    # Include contribution from final live points
+    logL_samples = worst_logL_buffer[:actual_iterations]
+    delta_logZ_trajectory = delta_logZ_buffer[:actual_iterations]
+    scale_trajectory = scale_buffer[:actual_iterations]
+    best_final_logL = jnp.max(live_logL_final)
 
-    iterations = jnp.arange(max_iterations)
+    # Recalculate final logZ and H
+    iterations_arr = jnp.arange(actual_iterations)
+    logX_i = -iterations_arr / nlive
+    logX_i_plus_1 = -(iterations_arr + 1) / nlive
+    log_dX_dead = logsubexp(logX_i, logX_i_plus_1)
+    log_dZ_dead = logL_samples + log_dX_dead
 
-    # Log prior volume at each iteration: logX_i = -i/nlive
-    logX = -iterations / nlive
-
-    # Log prior volume at previous iteration
-    logX_prev = jnp.concatenate([jnp.array([0.0]), logX[:-1]])
-
-    # Shrinkage in prior volume
-    log_dX = logX_prev - jnp.log(nlive)
-
-    # Log evidence contributions from dead points
-    log_dZ_dead = final_worst_logL_samples + log_dX
-
-    # Add contribution from final live points (use the best one)
-    best_final_logL = jnp.max(final_live_logL)
-    log_dX_final = -max_iterations / nlive - jnp.log(nlive)
+    logX_final = -actual_iterations / nlive
+    log_dX_final = logX_final - jnp.log(nlive)
     log_dZ_final = best_final_logL + log_dX_final
 
-    # Combine all contributions
     log_dZ_all = jnp.concatenate([log_dZ_dead, jnp.array([log_dZ_final])])
+    logZ = float(jax.scipy.special.logsumexp(log_dZ_all))
 
-    # Total log evidence
-    logZ = jax.scipy.special.logsumexp(log_dZ_all)
-
-    # Information H (using all samples including final live points)
     log_weights_all = jnp.concatenate([
         log_dZ_dead - logZ,
         jnp.array([log_dZ_final - logZ])
     ])
     weights_all = jnp.exp(log_weights_all)
+    logL_all = jnp.concatenate([logL_samples, jnp.array([best_final_logL])])
+    H = float(jnp.sum(weights_all * logL_all)) - logZ
 
-    logL_all = jnp.concatenate([final_worst_logL_samples, jnp.array([best_final_logL])])
-    H = jnp.sum(weights_all * logL_all)
+    logZ_error = float(jnp.sqrt(jnp.abs(H) / nlive))
 
-    # Get the final delta_logZ value (last iteration)
-    delta_logZ = final_delta_logZ_trace[-1]
-
-    # Standard error on logZ
-    logZ_error = jnp.sqrt(jnp.abs(H) / nlive)
-
-    acceptance_rate = jnp.mean(accept_rates)
-
-    result = NSResult(
-        logZ=float(logZ),
-        logZ_error=float(logZ_error),
-        H=float(H),
-        delta_logZ=float(delta_logZ),
-        n_iterations=max_iterations,
-        runtime=runtime,
-        samples=dead_x,
-        logL_samples=dead_logL,
-        acceptance_rate=float(acceptance_rate),
-        delta_logZ_samples=final_delta_logZ_samples
-    )
+    total_acceptance = float(final_acceptance_count)
+    total_prop = float(final_total_proposals)
+    acceptance_rate = total_acceptance / total_prop if total_prop > 0 else 0.0
 
     if config.verbose:
-        print(f"\nNested sampling completed in {runtime:.2f}s")
-        print(f"Final logZ: {result.logZ:.3f} ± {result.logZ_error:.3f}")
-        print(f"Information H: {result.H:.3f}")
-        print(f"Remaining evidence (delta_logZ): {result.delta_logZ:.4f}")
-        print(f"Acceptance rate: {result.acceptance_rate:.3f}")
-        print(f"Speed: {result.n_iterations / runtime:.1f} iterations/sec")
+        print(f"Nested sampling completed in {runtime:.2f}s")
+        print(f"Total iterations: {actual_iterations}")
+        print(f"Final logZ: {logZ:.4f} ± {logZ_error:.4f}")
+        print(f"Information H: {H:.4f}")
+        print(f"Final delta_logZ: {delta_logZ_final:.6f}")
+        print(f"Converged: {delta_logZ_final < delta_logZ_threshold}")
+        print(f"Speed: {actual_iterations / runtime:.1f} iterations/sec")
+        print(f"Acceptance rate: {acceptance_rate:.1%}")
 
-        # Check convergence
-        if result.delta_logZ > config.delta_logZ_threshold:
-            import warnings
-            max_iter_reached = "hit max_iterations" if result.n_iterations >= max_iterations else "stopped early"
-            warnings.warn(
-                f"Run did NOT converge. {max_iter_reached} with delta_logZ = {result.delta_logZ:.4f} "
-                f"> threshold ({config.delta_logZ_threshold:.4f}). "
-                f"Results may be inaccurate. Increase max_iterations."
-            )
-        else:
-            print(f"✅ Converged: delta_logZ ({result.delta_logZ:.4f}) < {config.delta_logZ_threshold}")
-
-    return result
+    return WhileLoopNSResult(
+        logZ=logZ,
+        logZ_error=logZ_error,
+        H=H,
+        delta_logZ=float(delta_logZ_final),
+        n_iterations=actual_iterations,
+        runtime=runtime,
+        samples=samples,
+        logL_samples=logL_samples,
+        delta_logZ_trajectory=delta_logZ_trajectory,
+        scale_trajectory=scale_trajectory,
+        acceptance_rate=acceptance_rate,
+        live_x=live_x_final,
+        live_logL=live_logL_final,
+    )
