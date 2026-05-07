@@ -3,8 +3,10 @@ Results data structure and formatting for JNesty.
 
 Provides a Dynesty-compatible Results class and the format_results()
 function that converts raw sampler output into a structured results object.
+Also provides save_results() and load_results() for FITS I/O.
 """
 
+import os
 import numpy as np
 from typing import Optional
 
@@ -226,3 +228,156 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
     }
 
     return Results(results_dict)
+
+
+# ============================================================================
+# FITS I/O
+# ============================================================================
+
+# Scalar keys stored in the PrimaryHDU header.
+# (dict key, FITS keyword, comment)
+_SCALAR_KEYS = [
+    ('logz', 'LOGZ', 'Log evidence'),
+    ('logzerr', 'LOGZERR', 'Log evidence error'),
+    ('information', 'H', 'Information'),
+    ('nlive', 'NLIVE', 'Number of live points'),
+    ('niter', 'NITER', 'Number of iterations'),
+    ('eff', 'EFF', 'Sampling efficiency (%)'),
+    ('acceptance_rate', 'ACCRATE', 'Acceptance rate'),
+    ('converged', 'CONVERGD', 'Convergence flag'),
+    ('delta_logz', 'DLZ', 'Final delta logZ'),
+    ('delta_logZ_threshold', 'DLZTHR', 'Delta logZ threshold'),
+    ('rwalk_K', 'RWALKK', 'Random walk steps'),
+]
+
+
+def save_results(results, filepath):
+    """
+    Save a Results object to a FITS file.
+
+    Parameters
+    ----------
+    results : Results
+        Results object to save.
+    filepath : str
+        Output file path.
+    """
+    from astropy.io import fits
+
+    data = results._data if isinstance(results, Results) else results
+
+    # Primary HDU with scalar metadata in header
+    hdr = fits.Header()
+    hdr['JNESTY'] = True
+    for key, keyword, comment in _SCALAR_KEYS:
+        if key in data:
+            val = data[key]
+            if hasattr(val, 'item'):
+                val = val.item()
+            hdr[keyword] = (val, comment)
+
+    primary = fits.PrimaryHDU(header=hdr)
+
+    # Binary table with per-sample arrays
+    nsamples = len(data['logl'])
+    ndim = data['samples'].shape[1] if data['samples'].ndim > 1 else 1
+
+    cols = [
+        fits.Column(name='LOGL', format='D', array=data['logl']),
+        fits.Column(name='LOGWT', format='D', array=data['logwt']),
+        fits.Column(name='LOGVOL', format='D', array=data['logvol']),
+        fits.Column(name='SAMPLES', format=f'{ndim}D', array=data['samples']),
+    ]
+
+    if 'samples_u' in data and data['samples_u'] is not None:
+        cols.append(
+            fits.Column(name='SAMPLES_U', format=f'{ndim}D',
+                        array=data['samples_u'])
+        )
+
+    if 'logz_trajectory' in data:
+        cols.append(
+            fits.Column(name='LOGZ_TRJ', format='D',
+                        array=data['logz_trajectory'])
+        )
+
+    if 'logzerr_trajectory' in data:
+        cols.append(
+            fits.Column(name='LOGZERR_', format='D',
+                        array=data['logzerr_trajectory'])
+        )
+
+    if 'delta_logZ_trajectory' in data:
+        cols.append(
+            fits.Column(name='DLZ_TRJ', format='D',
+                        array=data['delta_logZ_trajectory'])
+        )
+
+    if 'scale_trajectory' in data:
+        cols.append(
+            fits.Column(name='SCALE_TR', format='D',
+                        array=data['scale_trajectory'])
+        )
+
+    table = fits.BinTableHDU.from_columns(cols)
+    hdu_list = fits.HDUList([primary, table])
+
+    # Atomic write
+    tmp = filepath + '.tmp'
+    hdu_list.writeto(tmp, overwrite=True)
+    os.replace(tmp, filepath)
+
+
+def load_results(filepath):
+    """
+    Load a Results object from a FITS file.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to the FITS file.
+
+    Returns
+    -------
+    Results
+        Loaded Results object.
+    """
+    from astropy.io import fits
+
+    with fits.open(filepath) as hdul:
+        hdr = hdul[0].header
+        table = hdul[1]
+
+        data = {}
+
+        # Read scalars from header
+        for key, keyword, _ in _SCALAR_KEYS:
+            if keyword in hdr:
+                data[key] = hdr[keyword]
+
+        # Convert boolean
+        if 'converged' in data:
+            data['converged'] = bool(data['converged'])
+
+        # Read arrays from table
+        data['logl'] = np.array(table.data['LOGL'])
+        data['logwt'] = np.array(table.data['LOGWT'])
+        data['logvol'] = np.array(table.data['LOGVOL'])
+        data['samples'] = np.array(table.data['SAMPLES'])
+
+        if 'SAMPLES_U' in table.columns.names:
+            data['samples_u'] = np.array(table.data['SAMPLES_U'])
+
+        if 'LOGZ_TRJ' in table.columns.names:
+            data['logz_trajectory'] = np.array(table.data['LOGZ_TRJ'])
+
+        if 'LOGZERR_' in table.columns.names:
+            data['logzerr_trajectory'] = np.array(table.data['LOGZERR_'])
+
+        if 'DLZ_TRJ' in table.columns.names:
+            data['delta_logZ_trajectory'] = np.array(table.data['DLZ_TRJ'])
+
+        if 'SCALE_TR' in table.columns.names:
+            data['scale_trajectory'] = np.array(table.data['SCALE_TR'])
+
+    return Results(data)

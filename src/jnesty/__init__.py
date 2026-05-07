@@ -13,7 +13,7 @@ Example:
 
 from .jnesty import NestedSampler
 from .sampler import run_nested_sampling, WhileLoopNSConfig, WhileLoopNSResult
-from .results import Results
+from .results import Results, save_results, load_results
 from . import plotting
 
 # Plotting functions
@@ -27,6 +27,8 @@ __all__ = [
     # Main API
     'NestedSampler',
     'Results',
+    'save_results',
+    'load_results',
 
     # Low-level
     'run_nested_sampling',
