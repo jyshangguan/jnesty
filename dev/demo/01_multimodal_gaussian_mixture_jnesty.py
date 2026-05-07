@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 import jax
 import jax.numpy as jnp
 from jax import random
-from jnesty import NestedSampler
+from jnesty import NestedSampler, save_results
 import matplotlib.pyplot as plt
 import json
 import time
@@ -364,7 +364,7 @@ def main():
     final_delta_logZ = results['delta_logz']
     converged = results['converged']
 
-    # Save numerical results
+    # Build summary for comparison plots
     summary = {
         'implementation': 'jnesty',
         'problem': 'multi_modal_gaussian_mixture',
@@ -382,16 +382,9 @@ def main():
         'iterations_per_sec': float(results['niter'] / runtime)
     }
 
-    with open(outdir / 'summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    # Save samples
-    np.savez(outdir / 'samples.npz', samples=samples, logL=logL_samples)
-
-    # Save trace
-    np.savez(outdir / 'trace.npz',
-             logL_trajectory=logL_samples,
-             delta_logZ_trajectory=delta_logZ_trajectory)
+    # Save FITS results
+    save_results(results, str(outdir / 'results.fits'))
+    print("    Saved: results.fits")
 
     print("\nGenerating plots...")
 

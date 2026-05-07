@@ -25,8 +25,9 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-import json
+
 import time
+from jnesty.results import save_results
 
 
 # ============================================================================
@@ -130,36 +131,22 @@ def main():
     n_evals = int(results.ncall[0] if hasattr(results.ncall, '__len__') else results.ncall)
     delta_logZ = float(results.dlogz[-1]) if hasattr(results, 'dlogz') and len(results.dlogz) > 0 else 0.0
 
-    # Save numerical results
-    summary = {
-        'implementation': 'dynesty',
-        'problem': 'gaussian_shells',
-        'dimension': int(ndim),
-        'nlive': int(nlive),
-        'max_iterations': args.max_iterations,
-        'seed': args.seed,
-        'shell_radius': float(r),
-        'shell_width': float(w),
-        'shell_center1': [float(c1[0]), float(c1[1])],
-        'shell_center2': [float(c2[0]), float(c2[1])],
-        'logZ': float(logZ),
-        'logZ_error': float(logZ_err),
-        'H': information,
-        'delta_logZ': float(delta_logZ),
-        'converged': bool(delta_logZ < 0.01),
-        'n_iterations': int(n_iterations),
-        'n_likelihood_evals': n_evals,
-        'runtime': float(runtime),
+    # Save FITS results
+    fits_results = {
+        'logz': logZ, 'logzerr': logZ_err, 'information': information,
+        'nlive': int(nlive), 'niter': n_iterations, 'eff': 0.0,
+        'acceptance_rate': 0.0, 'converged': delta_logZ < 0.01,
+        'delta_logz': delta_logZ, 'delta_logZ_threshold': 0.01, 'rwalk_K': 0,
+        'logl': logL_samples, 'logwt': np.log(weights + 1e-300),
+        'logvol': np.zeros(n_iterations),
+        'samples': samples, 'samples_u': samples,
+        'logz_trajectory': np.full(n_iterations, logZ),
+        'logzerr_trajectory': np.full(n_iterations, logZ_err),
+        'delta_logZ_trajectory': np.zeros(n_iterations),
+        'scale_trajectory': np.ones(n_iterations),
     }
-
-    with open(outdir / 'summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    # Save samples
-    np.savez(outdir / 'samples.npz', samples=samples, weights=weights, logL=logL_samples)
-
-    # Save trace
-    np.savez(outdir / 'trace.npz', logL_trajectory=logL_samples, logZ=np.full(n_iterations, logZ))
+    save_results(fits_results, str(outdir / 'results.fits'))
+    print("    Saved: results.fits")
 
     # Generate plots
     print("\nGenerating plots...")

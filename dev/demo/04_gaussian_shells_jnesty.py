@@ -30,9 +30,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 import jax
 import jax.numpy as jnp
 from jax import random
-from jnesty import NestedSampler
+from jnesty import NestedSampler, save_results
 import matplotlib.pyplot as plt
-import json
+
 import time
 import numpy as np
 
@@ -140,39 +140,9 @@ def main():
     final_delta_logZ = results['delta_logz']
     converged = results['converged']
 
-    # Save numerical results
-    summary = {
-        'implementation': 'jnesty',
-        'problem': 'gaussian_shells',
-        'dimension': ndim,
-        'nlive': args.nlive,
-        'max_iterations': args.max_iterations,
-        'seed': args.seed,
-        'shell_radius': float(r),
-        'shell_width': float(w),
-        'shell_center1': [float(c1[0]), float(c1[1])],
-        'shell_center2': [float(c2[0]), float(c2[1])],
-        'logZ': float(results['logz']),
-        'logZ_error': float(results['logzerr']),
-        'H': float(results['information']),
-        'delta_logZ': float(final_delta_logZ),
-        'converged': bool(converged),
-        'n_iterations': int(results['niter']),
-        'runtime': float(runtime),
-        'iterations_per_sec': float(results['niter'] / runtime) if runtime > 0 else 0,
-        'acceptance_rate': float(results['acceptance_rate'])
-    }
-
-    with open(outdir / 'summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    # Save samples
-    np.savez(outdir / 'samples.npz', samples=samples, logL=logL_samples)
-
-    # Save trace
-    np.savez(outdir / 'trace.npz',
-             logL_trajectory=logL_samples,
-             delta_logZ_trajectory=delta_logZ_trajectory)
+    # Save FITS results
+    save_results(results, str(outdir / 'results.fits'))
+    print("    Saved: results.fits")
 
     # Generate plots
     print("\nGenerating plots...")

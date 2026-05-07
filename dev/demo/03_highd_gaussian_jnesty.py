@@ -27,9 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 import jax
 import jax.numpy as jnp
 from jax import random
-from jnesty import NestedSampler
+from jnesty import NestedSampler, save_results
 import matplotlib.pyplot as plt
-import json
+
 import time
 import numpy as np
 
@@ -138,39 +138,9 @@ def main():
     logZ_analytical = ndim * log(Z_1d)
     H_analytical = ndim / 2.0
 
-    # Save numerical results
-    summary = {
-        "implementation": "jnesty",
-        "problem": "highd_gaussian",
-        "dimension": ndim,
-        "nlive": args.nlive,
-        "max_iterations": args.max_iterations,
-        "seed": args.seed,
-        "logZ": float(results['logz']),
-        "logZ_error": float(results['logzerr']),
-        "logZ_analytical": logZ_analytical,
-        "logZ_diff": float(results['logz'] - logZ_analytical),
-        "H": float(results['information']),
-        "H_analytical": H_analytical,
-        "H_diff": float(results['information'] - H_analytical),
-        "delta_logZ": final_delta_logZ,
-        "converged": bool(converged),
-        "n_iterations": int(results['niter']),
-        "runtime": runtime,
-        "iterations_per_sec": float(results['niter']) / runtime if runtime > 0 else 0,
-        "acceptance_rate": float(results['acceptance_rate'])
-    }
-
-    with open(outdir / 'summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    # Save samples
-    np.savez(outdir / 'samples.npz', samples=samples, logL=logL_samples)
-
-    # Save trace
-    np.savez(outdir / 'trace.npz',
-             logL_samples=logL_samples,
-             delta_logZ_trajectory=delta_logZ_trajectory)
+    # Save FITS results
+    save_results(results, str(outdir / 'results.fits'))
+    print("    Saved: results.fits")
 
     # Save auto-tuned parameters for reference
     with open(outdir / 'auto_tuning.txt', 'w') as f:
