@@ -121,7 +121,7 @@ class NestedSampler:
 
         # Auto-tune batch_size
         if batch_size is None:
-            batch_size = rwalk_K // max(2, rwalk_K * 10 // nlive)
+            batch_size = rwalk_K // max(1, rwalk_K * 10 // nlive)
             if verbose:
                 print(f"Auto-tuned batch_size = {batch_size} "
                       f"(rwalk_K={rwalk_K}, nlive={nlive})")
