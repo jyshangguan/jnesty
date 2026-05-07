@@ -59,6 +59,10 @@ It seems that our multi-ellipsoid bounding is much slower than the dynesty. Plea
 I want you to add unit tests to confirm the robustness and speed of all the key functions. Please check the code carefully and give me a plan.
 
 
+## Annealing
+[Abandoned]
+Investigated annealed NS (temperature parameter) for peaked likelihoods. All three approaches tested produced biased posteriors — temperature disrupts the prior mass–likelihood relationship that NS relies on. Code rolled back.
+
 # Debug
 
 1. Please check why the trace plot of jnesty seems to have much less point than that from dynesty, while the number of samples are not much different (please verify it with the demo 01 results and plots). I understand that jnesty effectively use the same plot function as dynesty. Please help me to understand if there is any bugs.

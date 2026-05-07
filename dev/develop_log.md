@@ -499,3 +499,25 @@ Added `memory_frac=0.9` parameter with compile-time memory estimation via XLA's 
 - For expensive likelihoods (e.g., 2000x50 matmul, 808 KB/walk): caps appropriately (500 → 2 with memory_frac=0.0001)
 
 **Files changed:** `sampler.py` (`estimate_batch_size_from_memory()` + probe insertion), `jnesty.py` (default batch_size=nlive, memory_frac parameter)
+
+**Update 2026-05-07 (batch_size revert):**
+
+Reverted `batch_size` default from `nlive` back to `rwalk_K // max(1, rwalk_K * 10 // nlive)`. Testing with nlive=2000 on a real fitting problem showed batch_size=nlive is much slower than the auto-tuned formula (~945 likelihood evaluations per iteration vs ~40) because the GPU parallelism doesn't compensate for the massive wasted work when likelihood is already fast. The auto-tune formula targets ~1 step/walk at high nlive while keeping batch_size small for fast likelihoods.
+
+Changed `max(2, ...)` to `max(1, ...)` in the formula so batch_size can reach 1 step/walk for nlive=2000.
+
+**Update 2026-05-07 (GPU sharding fix):**
+
+Fixed GPU sharding for non-divisible batch_size. Previously used `gcd(batch_size, n_devices)` which disabled sharding entirely when gcd=1 (e.g., batch=945, n_devices=8). Now rounds batch_size down to nearest multiple of n_devices, maintaining even distribution across all GPUs.
+
+**Update 2026-05-07 (annealing investigation — abandoned):**
+
+Investigated annealed nested sampling (temperature parameter) to help find sharp peaks in difficult likelihoods. Three approaches tested on 5D correlated Gaussian:
+
+1. **Relaxed threshold** (`worst_logL`): Posterior biased, mean off by ~1 sigma, std underestimated by ~20%.
+2. **Tight threshold** (`worst_logL / T`): Posterior strongly biased, mean off by ~2 sigma, std underestimated by ~40%.
+3. **Tight threshold + best-point starting**: Walk starts from highest-logL live point. Still biased.
+
+**Root cause:** Nested sampling weights depend on the prior mass compression rate matching the likelihood evolution. Temperature disrupts this relationship — it changes which points are removed and in what order, which corrupts both the evidence AND the posterior weights. This is fundamental to how NS works, not a fixable implementation issue.
+
+All annealing code rolled back. No temperature parameter in current codebase.
