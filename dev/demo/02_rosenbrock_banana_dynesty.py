@@ -17,8 +17,6 @@ Output:
     - trace_plot.png: Log-likelihood trajectory
 """
 
-import sys
-import os
 import argparse
 from pathlib import Path
 

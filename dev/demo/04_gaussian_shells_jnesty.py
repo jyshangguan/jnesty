@@ -19,13 +19,9 @@ Output:
     - trace_plot.png: Log-likelihood trajectory
 """
 
-import sys
-import os
 import argparse
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 
 import jax
 import jax.numpy as jnp

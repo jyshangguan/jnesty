@@ -18,10 +18,9 @@ Output:
     - corner.png: Corner plot (if dim <= 10)
 """
 
-import sys
-import os
 import argparse
 from pathlib import Path
+
 
 import numpy as np
 import matplotlib.pyplot as plt
