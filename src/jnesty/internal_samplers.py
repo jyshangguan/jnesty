@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 from jax import random, lax
 from typing import Optional
+from jax.sharding import PartitionSpec as P, Mesh, NamedSharding
 
 from .utils import randsphere
 
@@ -123,6 +124,23 @@ class RWalkSampler(InternalSampler):
         self.target_acceptance = target_acceptance
         self.batch_size = batch_size
 
+        # Shard parallel walks across available GPUs for even memory usage
+        devices = jax.devices()
+        n_devices = len(devices)
+        if batch_size > 1 and n_devices > 1:
+            import math
+            n_shard = math.gcd(batch_size, n_devices)
+            if n_shard > 1:
+                shard_devices = devices[:n_shard]
+                self._mesh = Mesh(shard_devices, ('walks',))
+                self._sharding = NamedSharding(self._mesh, P('walks'))
+            else:
+                self._mesh = None
+                self._sharding = None
+        else:
+            self._mesh = None
+            self._sharding = None
+
     def sample(self, key, x_start, logL_constraint, loglikelihood_fn,
                axes, scale, n_steps, prior_bounds=None,
                walk_schedule=None):
@@ -148,6 +166,10 @@ class RWalkSampler(InternalSampler):
             # Parallel walks: B walks with n_steps // B steps each
             steps_per_walk = max(1, n_steps // batch_size)
             walk_keys = random.split(key, batch_size)
+
+            # Distribute across GPUs for even memory usage
+            if self._sharding is not None:
+                walk_keys = jax.device_put(walk_keys, self._sharding)
 
             # vmap the walk across batch_size starting points
             # All start from x_start but use different keys
