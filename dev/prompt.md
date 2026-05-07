@@ -34,7 +34,22 @@ Please push our package up to GitHub.
 Please add the skills for this package. The skills should include the usage and development information. I hope it is structured and prepared for future developments. Please think carefully and give me a plan.
 
 
-# Speed with multi-ellipsoid bounding
+# Speed up
+
+## Parallelization
+[Done]
+I want you to evaluate how to parallelize the likelihood call in GPU. Make a dev branch and work there. Think carefully and make a plan.
+
+===
+[Done]
+Please evaluate if there is a default way to determine a suitable batch_size, so that the user do not need to specify. Give me a report first.
+
+===
+[Done]
+It seems that we only use a single GPU in the sampling when there are more available. Please understand what went wrong. Make a careful check first and give me a report.
+
+
+## Multi-ellipsoid bounding
 
 It seems that our multi-ellipsoid bounding is much slower than the dynesty. Please investigate if there is anything we can accelerate.
 
