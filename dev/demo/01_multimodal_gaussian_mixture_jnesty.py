@@ -29,9 +29,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src'))
 import jax
 import jax.numpy as jnp
 from jax import random
-from jnesty import NestedSampler, save_results
+from jnesty import NestedSampler, save_results, load_results
 import matplotlib.pyplot as plt
-import json
 import time
 import numpy as np
 
@@ -87,22 +86,19 @@ def prior_transform(u):
 def generate_comparison_plots(jaxns_outdir, dynesty_dir, jaxns_summary, jaxns_samples, jaxns_logL, jaxns_delta):
     """Generate comparison plots between J-Nesty and Dynesty results."""
 
-    # Load Dynesty results
+    # Load Dynesty results from FITS
     try:
-        with open(dynesty_dir / 'summary.json', 'r') as f:
-            dynesty_summary = json.load(f)
-        dynesty_data = np.load(dynesty_dir / 'samples.npz')
-        dynesty_samples = dynesty_data['samples']
-        dynesty_logL = dynesty_data['logL']
-
-        # Load trace if available
-        try:
-            dynesty_trace = np.load(dynesty_dir / 'trace.npz')
-            dynesty_delta = dynesty_trace.get('logZ', np.array([]))
-            if len(dynesty_delta) > 0:
-                dynesty_delta = np.abs(np.diff(dynesty_delta, prepend=0))
-        except:
-            dynesty_delta = np.array([])
+        dynesty_r = load_results(str(dynesty_dir / 'results.fits'))
+        dynesty_summary = {
+            'logZ': dynesty_r['logz'],
+            'logZ_error': dynesty_r['logzerr'],
+            'H': dynesty_r['information'],
+            'n_iterations': dynesty_r['niter'],
+            'converged': dynesty_r['converged'],
+        }
+        dynesty_samples = dynesty_r['samples']
+        dynesty_logL = dynesty_r['logl']
+        dynesty_delta = dynesty_r.get('delta_logZ_trajectory', np.array([]))
     except Exception as e:
         raise Exception(f"Could not load Dynesty results: {e}")
 
@@ -290,7 +286,8 @@ def generate_comparison_plots(jaxns_outdir, dynesty_dir, jaxns_summary, jaxns_sa
     print(f"{'logZ':<30} {jaxns_summary['logZ']:.4f} ± {jaxns_summary['logZ_error']:.4f}  {dynesty_summary['logZ']:.4f} ± {dynesty_summary.get('logZ_error', 0):.4f}")
     print(f"{'H':<30} {jaxns_summary['H']:.4f}              {dynesty_summary['H']:.4f}")
     print(f"{'Iterations':<30} {jaxns_summary['n_iterations']}              {dynesty_summary['n_iterations']}")
-    print(f"{'Runtime (s)':<30} {jaxns_summary['runtime']:.2f}              {dynesty_summary['runtime']:.2f}")
+    if 'runtime' in dynesty_summary:
+        print(f"{'Runtime (s)':<30} {jaxns_summary['runtime']:.2f}              {dynesty_summary['runtime']:.2f}")
     print("-"*70)
     print(f"{'logZ difference':<30} {logZ_diff:.4f}")
     print(f"{'Combined uncertainty':<30} ±{combined_unc:.4f}")
