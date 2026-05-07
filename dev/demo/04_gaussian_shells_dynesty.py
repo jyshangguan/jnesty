@@ -66,7 +66,7 @@ def prior_transform(u):
 def main():
     parser = argparse.ArgumentParser(description='Demo 4: Gaussian Shells (Dynesty)')
     parser.add_argument('--nlive', type=int, default=500, help='Number of live points')
-    parser.add_argument('--max_iterations', type=int, default=2000, help='Maximum iterations')
+    parser.add_argument('--max_iterations', type=int, default=20000, help='Maximum iterations')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
 
     args = parser.parse_args()

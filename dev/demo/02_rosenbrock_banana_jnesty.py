@@ -89,7 +89,7 @@ def prior_transform(u):
 def main():
     parser = argparse.ArgumentParser(description='J-Nesty on Rosenbrock Banana')
     parser.add_argument('--nlive', type=int, default=500, help='Number of live points')
-    parser.add_argument('--max_iterations', type=int, default=10000, help='Max iterations')
+    parser.add_argument('--max_iterations', type=int, default=20000, help='Max iterations')
     parser.add_argument('--a', type=float, default=1, help='Rosenbrock a parameter')
     parser.add_argument('--b', type=float, default=100, help='Rosenbrock b parameter')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
