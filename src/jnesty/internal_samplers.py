@@ -128,11 +128,11 @@ class RWalkSampler(InternalSampler):
         devices = jax.devices()
         n_devices = len(devices)
         if batch_size > 1 and n_devices > 1:
-            import math
-            n_shard = math.gcd(batch_size, n_devices)
-            if n_shard > 1:
-                shard_devices = devices[:n_shard]
-                self._mesh = Mesh(shard_devices, ('walks',))
+            # Round down to nearest multiple of n_devices for even sharding
+            effective_batch = (batch_size // n_devices) * n_devices
+            if effective_batch >= n_devices:
+                self.batch_size = effective_batch
+                self._mesh = Mesh(devices, ('walks',))
                 self._sharding = NamedSharding(self._mesh, P('walks'))
             else:
                 self._mesh = None

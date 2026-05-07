@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 from jax import random, lax
 
-from .internal_samplers import RWalkSampler
+from .internal_samplers import RWalkSampler, _single_walk
 from .utils import logsubexp
 
 # Import for progress tracking
@@ -43,6 +43,7 @@ class WhileLoopNSConfig(NamedTuple):
     bound_update_interval: int = 0
     max_ellipsoids: int = 20
     batch_size: int = 1
+    memory_frac: float = 0.9
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -60,6 +61,70 @@ class WhileLoopNSResult(NamedTuple):
     acceptance_rate: float
     live_x: jnp.ndarray = None
     live_logL: jnp.ndarray = None
+
+
+def estimate_batch_size_from_memory(
+    loglikelihood_fn, live_x, bound_axes, ndim, rwalk_K,
+    requested_batch_size, memory_frac=0.9, verbose=True,
+):
+    """
+    Cap batch_size based on available GPU memory.
+
+    Compiles a vmapped walk (batch_size=2) with the actual likelihood,
+    uses XLA's memory_analysis() to get peak memory, then caps batch_size
+    to fit within memory_frac of total GPU memory.
+
+    Returns the capped (or unchanged) batch_size.
+    """
+    if requested_batch_size <= 1:
+        return requested_batch_size
+
+    device = jax.devices()[0]
+    stats = device.memory_stats()
+    if stats is None:
+        return requested_batch_size
+
+    trial_batch = 2
+    trial_steps = max(1, rwalk_K // trial_batch)
+    x_start = live_x[0]
+
+    try:
+        trial_keys = random.split(random.PRNGKey(0), trial_batch)
+        trial_fn = jax.vmap(
+            lambda wk: _single_walk(
+                wk, x_start, jnp.array(-jnp.inf), loglikelihood_fn,
+                bound_axes, jnp.array(1.0), trial_steps, ndim,
+                None, None
+            )
+        )
+        compiled = jax.jit(trial_fn).lower(trial_keys).compile()
+    except Exception as e:
+        if verbose:
+            print(f"WARNING: Memory probe failed ({e}). Falling back to batch_size=1.")
+        return 1
+
+    ma = compiled.memory_analysis()
+    if ma is None:
+        return requested_batch_size
+
+    peak = ma.peak_memory_in_bytes
+    per_walk = max(1, peak // trial_batch)
+
+    available = int(stats['bytes_limit'] * memory_frac)
+    max_batch = max(1, available // per_walk)
+    capped = min(requested_batch_size, max_batch)
+
+    if verbose and capped < requested_batch_size:
+        print(f"Memory cap: batch_size {requested_batch_size} -> {capped} "
+              f"(per-walk: {per_walk / 1024:.0f} KB, "
+              f"budget: {available / (1024**2):.0f} MB, "
+              f"GPU: {stats['bytes_limit'] / (1024**3):.1f} GB)")
+    elif verbose:
+        print(f"Memory check OK: batch_size={requested_batch_size} "
+              f"(per-walk: {per_walk / 1024:.0f} KB, "
+              f"budget: {available / (1024**2):.0f} MB)")
+
+    return capped
 
 
 def run_nested_sampling(
@@ -149,6 +214,24 @@ def run_nested_sampling(
             bound_obj.fit(live_physical)
         else:
             bound_obj.fit(live_x)
+
+    # Memory-cap batch_size based on available GPU memory
+    bound_axes_for_probe = bound_obj.get_axes()
+    effective_batch_size = estimate_batch_size_from_memory(
+        loglikelihood_fn=loglikelihood_for_jit,
+        live_x=live_x,
+        bound_axes=bound_axes_for_probe,
+        ndim=ndim,
+        rwalk_K=rwalk_K,
+        requested_batch_size=config.batch_size,
+        memory_frac=config.memory_frac,
+        verbose=config.verbose,
+    )
+    if effective_batch_size != config.batch_size:
+        sampler_obj = get_sampler('rwalk', ndim,
+                                  target_acceptance=config.target_acceptance,
+                                  batch_size=effective_batch_size)
+        config = config._replace(batch_size=effective_batch_size)
 
     # Compile-time flags
     use_multi_ellipsoid = config.bound == 'multi'

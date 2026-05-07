@@ -46,6 +46,7 @@ NestedSampler(
     bound_update_interval=None,  # None=auto (nlive for multi, 0 otherwise)
     max_ellipsoids=20,    # int: max ellipsoids for multi-ellipsoid
     batch_size=None,      # int or None: parallel walks (auto: rwalk_K // max(2, rwalk_K*10//nlive))
+    memory_frac=0.9,      # float: cap batch_size to fit within this fraction of GPU memory
 )
 ```
 
@@ -128,6 +129,9 @@ Multi-ellipsoid uses recursive k-means splitting with BIC selection. It requires
 - **batch_size**: Auto-tuned to `rwalk_K // max(2, rwalk_K * 10 // nlive)`. Runs `batch_size`
   independent walks in parallel via `jax.vmap`, each with `rwalk_K // batch_size` steps. Set to
   1 to disable parallelism. Larger values benefit expensive likelihoods on GPU.
+- **memory_frac**: Fraction of GPU memory available for batch walks (default 0.9). Caps
+  auto-tuned `batch_size` if it would exceed this fraction of GPU memory. Uses compile-time
+  memory estimation via XLA's `memory_analysis()`. Ignored on CPU.
 
 ## Plotting
 

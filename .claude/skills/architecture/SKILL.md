@@ -74,6 +74,7 @@ class WhileLoopNSConfig(NamedTuple):
     bound_update_interval: int = 0
     max_ellipsoids: int = 20
     batch_size: int = 1
+    memory_frac: float = 0.9
 ```
 
 ### WhileLoopNSResult (sampler.py)
@@ -189,6 +190,19 @@ x_candidates, n_accepted_arr = vmapped_walk(walk_keys)
 When `batch_size > 1`, `RWalkSampler.sample()` runs `batch_size` independent walks in parallel via `jax.vmap`. Each walk has `rwalk_K // batch_size` steps. The first valid candidate among the batch is selected as the replacement. This parallelizes likelihood evaluation on GPU without introducing sampling bias (each walk is independently correct).
 
 Walk keys are sharded across available GPUs via `NamedSharding` using `gcd(batch_size, num_devices)` devices, spreading memory evenly. Controlled by `CUDA_VISIBLE_DEVICES` for device selection.
+
+### Compile-time memory estimation for batch capping
+
+```python
+# In sampler.py: estimate_batch_size_from_memory()
+trial_fn = jax.vmap(lambda wk: _single_walk(...))
+compiled = jax.jit(trial_fn).lower(trial_keys).compile()
+peak = compiled.memory_analysis().peak_memory_in_bytes
+per_walk = peak // trial_batch
+max_batch = available_budget // per_walk
+```
+
+Uses XLA's `memory_analysis()` to get compile-time peak memory estimate (no runtime execution needed). Runs before the main loop to cap `batch_size` from `nlive` to fit within `memory_frac` of GPU memory.
 
 ## Registry / Factory Pattern
 

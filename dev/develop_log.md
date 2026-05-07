@@ -488,3 +488,14 @@ Scales with nlive: more live points → less decorrelation needed per replacemen
 All within Monte Carlo uncertainty. No systematic bias.
 
 **Files:** `internal_samplers.py` (core: `_single_walk()`, `_propose_one()`, parallel walks), `sampler.py` (batch_size config + acceptance counting), `jnesty.py` (public API + auto-tuning)
+
+**Update 2026-05-07:**
+
+Changed default `batch_size = nlive` for maximum GPU parallelism. Validated that even batch_size=500 (1 step/walk) produces statistically correct results on both 5D Gaussian and 2D Gaussian shells (both within MC uncertainty of analytical logZ).
+
+Added `memory_frac=0.9` parameter with compile-time memory estimation via XLA's `memory_analysis().peak_memory_in_bytes`. Before the main loop, the sampler compiles a batch_size=2 trial walk using the actual loglikelihood_fn, measures per-walk peak memory, then caps batch_size to fit within `memory_frac` of GPU memory.
+
+- For simple likelihoods (<1 KB/walk): batch_size stays at nlive (easily fits)
+- For expensive likelihoods (e.g., 2000x50 matmul, 808 KB/walk): caps appropriately (500 → 2 with memory_frac=0.0001)
+
+**Files changed:** `sampler.py` (`estimate_batch_size_from_memory()` + probe insertion), `jnesty.py` (default batch_size=nlive, memory_frac parameter)
