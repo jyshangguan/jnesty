@@ -27,18 +27,17 @@ Bounding: multi-ellipsoid
 
 ### Numerical Results
 ```
-logZ:               -27.5898 ± 0.1876
+logZ:               -27.5026 ± 0.1871
 logZ (analytical):  -27.6729
-logZ diff:           0.0832
-H:                   17.5881
+logZ diff:           0.1703
+H:                   17.5019
 H (analytical):      10.0
-H diff:              7.5881
-delta_logZ:          0.0100
+H diff:              7.5019
+delta_logZ:          0.009984
 Converged:           True
-Iterations:          15336
-Runtime:             109.28s
-Speed:               140.33 iterations/sec
-Acceptance rate:     0.498
+Iterations:          15363
+Runtime:             ~27s
+Acceptance rate:     0.4965
 ```
 
 ### Visualizations
@@ -48,7 +47,7 @@ Acceptance rate:     0.498
 
 **Observations:**
 - Evidence converges toward the analytical value (-27.67)
-- Convergence requires many iterations (15336) due to the 20D space
+- Convergence requires many iterations (15363) due to the 20D space
 - delta_logZ decreases steadily to the threshold
 
 #### Trace Plot - Parameter Evolution
@@ -82,16 +81,16 @@ Sample: rwalk
 
 ### Numerical Results
 ```
-logZ:               -27.6705 ± 0.1923
+logZ:               -27.4915 ± 0.1905
 logZ (analytical):  -27.6729
-logZ diff:           0.0024
-H:                   17.7306
-H (analytical):      20.0
-H diff:              2.2694
+logZ diff:           0.1814
+H:                   17.3611
+H (analytical):      10.0
+H diff:              7.3611
 delta_logZ:          0.0
 Converged:           True
-Iterations:          15820
-Runtime:             12.94s
+Iterations:          15635
+Runtime:             ~13s
 ```
 
 ### Visualizations
@@ -116,28 +115,28 @@ Runtime:             12.94s
 
 ### Quantitative Metrics
 
-| Implementation | LogZ | Error | H | H Diff | Iterations | Runtime | Speed (iter/s) |
-|----------------|------|-------|---|--------|------------|---------|----------------|
-| **JNesty** | -27.5898 | ±0.188 | 17.59 | 7.59 | 15336 | 109.28s | 140.3 |
-| **Dynesty** | -27.6705 | ±0.192 | 17.73 | 2.27 | 15820 | 12.94s | — |
-| **Analytical** | -27.6729 | — | 10.0 | — | — | — | — |
+| Implementation | LogZ | Error | H | H Diff | Iterations | Runtime |
+|----------------|------|-------|---|--------|------------|---------|
+| **JNesty** | -27.5026 | ±0.1871 | 17.50 | 7.50 | 15363 | ~27s |
+| **Dynesty** | -27.4915 | ±0.1905 | 17.36 | 7.36 | 15635 | ~13s |
+| **Analytical** | -27.6729 | — | 10.0 | — | — | — |
 
 ### Accuracy Analysis
 
 **LogZ vs Analytical:**
-- JNesty: diff = 0.083 (within 1 sigma)
-- Dynesty: diff = 0.002 (within 1 sigma)
+- JNesty: diff = 0.1703 (within 1 sigma)
+- Dynesty: diff = 0.1814 (within 1 sigma)
 - **Both within statistical uncertainty of the estimates**
 
 **LogZ Agreement (JNesty vs Dynesty):**
-- Difference: 0.081
-- Combined uncertainty: sqrt(0.188^2 + 0.192^2) ≈ ±0.269
+- Difference: 0.0111
+- Combined uncertainty: sqrt(0.1871^2 + 0.1905^2) ≈ ±0.267
 - **Status: EXCELLENT AGREEMENT** (well within combined uncertainty)
 
 **H (Information) Analysis:**
 - Both implementations overestimate H relative to the analytical value (10.0)
-- JNesty: H=17.59 (diff=7.59)
-- Dynesty: H=17.73 (diff=2.27)
+- JNesty: H=17.50 (diff=7.50)
+- Dynesty: H=17.36 (diff=7.36)
 - H overestimation is a known issue with random-walk nested sampling in high dimensions, where the prior-to-posterior compression is harder to estimate accurately
 - Both implementations show similar H values, suggesting the discrepancy is algorithmic rather than a bug
 
@@ -145,15 +144,14 @@ Runtime:             12.94s
 
 | Aspect | JNesty | Dynesty |
 |--------|--------|---------|
-| **Iterations** | 15336 (3% fewer) | 15820 |
-| **Runtime** | 109.28s | 12.94s |
-| **Iterations/sec** | 140.3 | — |
+| **Iterations** | 15363 (2% fewer) | 15635 |
+| **Runtime** | ~27s | ~13s |
 | **Convergence** | delta_logZ=0.010 | delta_logZ=0.0 |
 
 **Analysis:**
-- Dynesty is ~8x faster in wall-clock time
+- Dynesty is ~2x faster in wall-clock time
 - Both require a similar number of iterations (~15k) for the 20D problem
-- JNesty's iteration speed (140 iter/s) is reasonable given the JAX overhead per iteration
+- JNesty's per-iteration cost is competitive given the JAX overhead
 - Note: JNesty's speed advantage would manifest with expensive likelihood evaluations where GPU parallelism helps
 
 ---
@@ -169,7 +167,7 @@ Runtime:             12.94s
 
 ## Conclusion
 
-Both JNesty and Dynesty produce consistent logZ estimates for the 20D Gaussian problem. The logZ difference of 0.081 is well within the combined uncertainty of ±0.269. Both estimates are close to the analytical value of -27.67. The H overestimation relative to the analytical value is consistent between the two implementations and reflects the known behavior of random-walk sampling in high dimensions.
+Both JNesty and Dynesty produce consistent logZ estimates for the 20D Gaussian problem. The logZ difference of 0.0111 is well within the combined uncertainty of ±0.267. Both estimates are close to the analytical value of -27.67. The H overestimation relative to the analytical value is consistent between the two implementations and reflects the known behavior of random-walk sampling in high dimensions.
 
 ---
 

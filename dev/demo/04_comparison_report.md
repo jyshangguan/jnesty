@@ -26,14 +26,13 @@ Bounding: multi-ellipsoid
 
 ### Numerical Results
 ```
-logZ:           -1.7823 ± 0.0729
-H:               2.6570
-delta_logZ:      0.009981
+logZ:           -1.7532 ± 0.0728
+H:               2.6482
+delta_logZ:      0.009990
 Converged:       True
-Iterations:      3884
-Runtime:         45.81s
-Speed:           84.78 iterations/sec
-Acceptance rate: 0.498
+Iterations:      3869
+Runtime:         ~16s
+Acceptance rate: 0.4981
 ```
 
 ### Visualizations
@@ -44,7 +43,7 @@ Acceptance rate: 0.498
 **Observations:**
 - Evidence converges smoothly
 - delta_logZ decreases monotonically
-- Convergence at iteration 3884
+- Convergence at iteration 3869
 
 #### Trace Plot - Parameter Evolution
 ![JNesty Trace Plot](output_04_jnesty/trace_plot.png)
@@ -77,12 +76,12 @@ Sample: rwalk
 
 ### Numerical Results
 ```
-logZ:        -1.7623 ± 0.0751
-H:            2.6566
+logZ:        -1.8891 ± 0.0768
+H:            2.7789
 delta_logZ:   0.0
 Converged:    True
-Iterations:   4382
-Runtime:      2.63s
+Iterations:   4446
+Runtime:      ~2.5s
 ```
 
 ### Visualizations
@@ -123,32 +122,32 @@ Runtime:      2.63s
 
 | Implementation | LogZ | Error | H | Iterations | Runtime | Acceptance |
 |----------------|------|-------|---|------------|---------|------------|
-| **JNesty** | -1.7823 | ±0.0729 | 2.657 | 3884 | 45.81s | 0.498 |
-| **Dynesty** | -1.7623 | ±0.0751 | 2.657 | 4382 | 2.63s | — |
+| **JNesty** | -1.7532 | ±0.0728 | 2.648 | 3869 | ~16s | 0.4981 |
+| **Dynesty** | -1.8891 | ±0.0768 | 2.779 | 4446 | ~2.5s | — |
 
 ### Accuracy Analysis
 
 **LogZ Agreement:**
-- Difference: 0.020
-- Combined uncertainty: sqrt(0.0729^2 + 0.0751^2) ≈ ±0.105
-- **Status: EXCELLENT AGREEMENT** (well within combined uncertainty)
+- Difference: 0.1359
+- Combined uncertainty: sqrt(0.0728^2 + 0.0768^2) ≈ ±0.1059
+- **Status: OUTSIDE** (marginally outside combined uncertainty)
 
 **Analysis:**
-- The 0.020 logZ difference is very small relative to the uncertainties
-- H values match almost exactly (2.657 vs 2.657)
+- The 0.1359 logZ difference slightly exceeds the combined uncertainty of ±0.1059
+- H values differ moderately (2.648 vs 2.779)
 - Both implementations correctly identify and sample both shells
-- This is the closest agreement of all four test problems
+- The marginal discrepancy may reflect differences in bounding method (multi-ellipsoid vs none) affecting shell exploration efficiency
 
 ### Performance Analysis
 
 | Aspect | JNesty | Dynesty |
 |--------|--------|---------|
-| **Iterations** | 3884 (11% fewer) | 4382 |
-| **Runtime** | 45.81s | 2.63s |
+| **Iterations** | 3869 (13% fewer) | 4446 |
+| **Runtime** | ~16s | ~2.5s |
 | **Convergence** | delta_logZ=0.010 | delta_logZ=0.0 |
 
 **Analysis:**
-- JNesty uses fewer iterations (3884 vs 4382) but higher per-iteration cost
+- JNesty uses fewer iterations (3869 vs 4446) but higher per-iteration cost
 - Dynesty is significantly faster for this 2D problem with cheap likelihoods
 - Both correctly handle the thin shell structures
 - The shell problem is well-suited for testing degenerate posterior shapes
@@ -157,8 +156,8 @@ Runtime:      2.63s
 
 ## Key Takeaways
 
-1. **Accuracy:** Excellent logZ agreement (diff=0.020, well within ±0.105 combined uncertainty)
-2. **H agreement:** Nearly identical H values (2.657 for both)
+1. **Accuracy:** LogZ difference of 0.1359 marginally exceeds the combined uncertainty of ±0.1059
+2. **H values:** Moderate discrepancy (2.648 vs 2.779), both reasonable for this problem
 3. **Shell structure:** Both correctly sample the thin ring-shaped posteriors
 4. **Convergence:** Both achieve proper convergence with similar iteration counts
 
@@ -166,7 +165,7 @@ Runtime:      2.63s
 
 ## Conclusion
 
-Both JNesty and Dynesty successfully solve the Gaussian shells problem with excellent agreement. The logZ difference of 0.020 is the smallest of all four test problems, and the H values match almost exactly. This validates JNesty's ability to handle thin, degenerate posterior structures.
+Both JNesty and Dynesty successfully solve the Gaussian shells problem, though the logZ difference of 0.1359 is marginally outside the combined uncertainty of ±0.1059. Both correctly identify and sample the thin shell structures. The discrepancy may stem from differences in bounding methods or run-to-run statistical fluctuation in this challenging degenerate geometry.
 
 ---
 
@@ -188,4 +187,4 @@ python 04_gaussian_shells_dynesty.py --nlive 500
 
 **Date:** 2026-05-07
 **Problem:** Gaussian Shells (2D)
-**Status:** Complete - Excellent agreement with Dynesty
+**Status:** Complete - Marginal discrepancy with Dynesty

@@ -26,14 +26,13 @@ Bounding: multi-ellipsoid
 
 ### Numerical Results
 ```
-logZ:           -4.3064 ± 0.0831
-H:               3.4499
-delta_logZ:      0.009986
+logZ:           -4.2850 ± 0.0832
+H:               3.4644
+delta_logZ:      0.009992
 Converged:       True
-Iterations:      4454
-Runtime:         48.51s
-Speed:           91.82 iterations/sec
-Acceptance rate: 0.499
+Iterations:      4443
+Runtime:         ~13s
+Acceptance rate: 0.4982
 ```
 
 ### Visualizations
@@ -44,7 +43,7 @@ Acceptance rate: 0.499
 **Observations:**
 - Evidence converges smoothly
 - delta_logZ decreases monotonically to the convergence threshold
-- Convergence at iteration 4454
+- Convergence at iteration 4443
 
 #### Trace Plot - Parameter Evolution
 ![JNesty Trace Plot](output_02_jnesty/trace_plot.png)
@@ -85,12 +84,12 @@ Sample: rwalk
 
 ### Numerical Results
 ```
-logZ:        -4.2236 ± 0.0852
-H:            3.4127
+logZ:        -4.3778 ± 0.0869
+H:            3.5563
 delta_logZ:   0.0
 Converged:    True
-Iterations:   4922
-Runtime:      2.08s
+Iterations:   4999
+Runtime:      ~2s
 ```
 
 ### Visualizations
@@ -124,28 +123,28 @@ Runtime:      2.08s
 
 | Implementation | LogZ | Error | H | Iterations | Runtime | Acceptance |
 |----------------|------|-------|---|------------|---------|------------|
-| **JNesty** | -4.3064 | ±0.0831 | 3.45 | 4454 | 48.51s | 0.499 |
-| **Dynesty** | -4.2236 | ±0.0852 | 3.41 | 4922 | 2.08s | — |
+| **JNesty** | -4.2850 | ±0.0832 | 3.46 | 4443 | ~13s | 0.4982 |
+| **Dynesty** | -4.3778 | ±0.0869 | 3.56 | 4999 | ~2s | — |
 
 ### Accuracy Analysis
 
 **LogZ Agreement:**
-- Difference: 0.083
-- Combined uncertainty: sqrt(0.0831^2 + 0.0852^2) ≈ ±0.119
-- **Status: GOOD AGREEMENT** (within combined uncertainty)
+- Difference: 0.0928
+- Combined uncertainty: sqrt(0.0832^2 + 0.0869^2) ≈ ±0.1203
+- **Status: MARGINAL** (just within combined uncertainty)
 
 **Analysis:**
-- Results agree within Monte Carlo uncertainty
+- Results agree within Monte Carlo uncertainty, but only marginally
 - Both capture the banana-shaped posterior structure
-- H values are consistent (3.45 vs 3.41)
-- The 0.083 logZ difference is well within the expected statistical fluctuation
+- H values are consistent (3.46 vs 3.56)
+- The 0.0928 logZ difference is close to the combined uncertainty boundary, suggesting this run may be near the edge of statistical fluctuation
 
 ### Performance Analysis
 
 | Aspect | JNesty | Dynesty |
 |--------|--------|---------|
-| **Iterations** | 4454 (10% fewer) | 4922 |
-| **Runtime** | 48.51s | 2.08s |
+| **Iterations** | 4443 (11% fewer) | 4999 |
+| **Runtime** | ~13s | ~2s |
 | **Convergence** | delta_logZ=0.010 | delta_logZ=0.0 |
 
 **Analysis:**
@@ -158,7 +157,7 @@ Runtime:      2.08s
 
 ## Key Takeaways
 
-1. **Accuracy:** LogZ estimates agree within Monte Carlo uncertainty (diff=0.083 vs combined error=±0.119)
+1. **Accuracy:** LogZ estimates agree within Monte Carlo uncertainty but only marginally (diff=0.0928 vs combined error=±0.1203)
 2. **Non-Gaussian shape:** Both correctly capture the banana-shaped posterior
 3. **Convergence:** Both achieve proper convergence
 4. **Performance:** Dynesty is faster for this simple 2D problem
@@ -167,7 +166,7 @@ Runtime:      2.08s
 
 ## Conclusion
 
-Both JNesty and Dynesty successfully sample the Rosenbrock banana posterior. The logZ difference of 0.083 is within the combined uncertainty of ±0.119. This validates JNesty's ability to handle non-Gaussian, curved posterior structures.
+Both JNesty and Dynesty successfully sample the Rosenbrock banana posterior. The logZ difference of 0.0928 is marginally within the combined uncertainty of ±0.1203. This validates JNesty's ability to handle non-Gaussian, curved posterior structures, though the marginal agreement suggests some run-to-run variability.
 
 ---
 
@@ -189,4 +188,4 @@ python 02_rosenbrock_banana_dynesty.py --nlive 500
 
 **Date:** 2026-05-07
 **Problem:** Rosenbrock Banana (2D)
-**Status:** Complete - Good agreement with Dynesty
+**Status:** Complete - Marginal agreement with Dynesty

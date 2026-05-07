@@ -26,13 +26,13 @@ Bounding: multi-ellipsoid
 
 ### Numerical Results
 ```
-logZ:        -6.9489 ± 0.0881
-H:            3.8782
-delta_logZ:   0.009985
-Converged:    True
-Iterations:   5510
-Runtime:      55.49s
-Speed:        99.30 iterations/sec
+logZ:           -6.8765 ± 0.0877
+H:               3.8429
+delta_logZ:      0.009981
+Converged:       True
+Iterations:      5475
+Runtime:         ~16s
+Acceptance rate: 0.4975
 ```
 
 ### Visualizations
@@ -42,7 +42,7 @@ Speed:        99.30 iterations/sec
 
 **Observations:**
 - Evidence (logZ) converges smoothly with decreasing delta_logZ
-- Convergence achieved at iteration 5510 with delta_logZ < 0.01
+- Convergence achieved at iteration 5475 with delta_logZ < 0.01
 - Log-likelihood increases monotonically as expected
 
 #### Trace Plot - Parameter Evolution
@@ -84,12 +84,12 @@ Sample: rwalk
 
 ### Numerical Results
 ```
-logZ:        -6.9985 ± 0.0914
-H:            3.8689
+logZ:        -6.8500 ± 0.0901
+H:            3.7601
 delta_logZ:   0.0
 Converged:    True
-Iterations:   6038
-Runtime:      3.66s
+Iterations:   5971
+Runtime:      ~3s
 ```
 
 ### Visualizations
@@ -121,30 +121,30 @@ Runtime:      3.66s
 
 ### Quantitative Metrics
 
-| Implementation | LogZ | Error | H | Iterations | Runtime | Speed (iter/s) |
-|----------------|------|-------|---|------------|---------|----------------|
-| **JNesty** | -6.9489 | ±0.0881 | 3.88 | 5510 | 55.49s | 99.3 |
-| **Dynesty** | -6.9985 | ±0.0914 | 3.87 | 6038 | 3.66s | — |
+| Implementation | LogZ | Error | H | Iterations | Runtime | Acceptance |
+|----------------|------|-------|---|------------|---------|------------|
+| **JNesty** | -6.8765 | ±0.0877 | 3.84 | 5475 | ~16s | 0.4975 |
+| **Dynesty** | -6.8500 | ±0.0901 | 3.76 | 5971 | ~3s | — |
 
 ### Accuracy Analysis
 
 **LogZ Agreement:**
-- Difference: 0.050
-- Combined uncertainty: sqrt(0.0881^2 + 0.0914^2) ≈ ±0.127
-- **Status: EXCELLENT AGREEMENT** (well within combined uncertainty)
+- Difference: 0.0265
+- Combined uncertainty: sqrt(0.0877^2 + 0.0901^2) ≈ ±0.1266
+- **Status: AGREEMENT** (well within combined uncertainty)
 
 **Analysis:**
 - Results agree within Monte Carlo uncertainty
 - Both implementations correctly identify bi-modality
-- H values match closely (3.88 vs 3.87)
+- H values are consistent (3.84 vs 3.76)
 - Both achieve convergence (delta_logZ < 0.01)
 
 ### Performance Analysis
 
 | Aspect | JNesty | Dynesty |
 |--------|--------|---------|
-| **Iterations** | 5510 (9% fewer) | 6038 |
-| **Runtime** | 55.49s | 3.66s |
+| **Iterations** | 5475 (8% fewer) | 5971 |
+| **Runtime** | ~16s | ~3s |
 | **Convergence** | delta_logZ=0.010 | delta_logZ=0.0 |
 
 **Analysis:**
@@ -166,7 +166,7 @@ Runtime:      3.66s
 
 ## Conclusion
 
-Both JNesty and Dynesty successfully solve this multi-modal Gaussian mixture problem. The logZ estimates agree to within 0.050, well within the combined uncertainty of ±0.127. This validates JNesty's correctness for multi-modal problems.
+Both JNesty and Dynesty successfully solve this multi-modal Gaussian mixture problem. The logZ estimates agree to within 0.0265, well within the combined uncertainty of ±0.1266. This validates JNesty's correctness for multi-modal problems.
 
 ---
 
@@ -188,4 +188,4 @@ python 01_multimodal_gaussian_mixture_dynesty.py --nlive 500
 
 **Date:** 2026-05-07
 **Problem:** Multi-modal Gaussian Mixture (5D)
-**Status:** Complete - Excellent agreement with Dynesty
+**Status:** Complete - Good agreement with Dynesty
