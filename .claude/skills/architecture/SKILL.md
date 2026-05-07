@@ -188,6 +188,8 @@ x_candidates, n_accepted_arr = vmapped_walk(walk_keys)
 
 When `batch_size > 1`, `RWalkSampler.sample()` runs `batch_size` independent walks in parallel via `jax.vmap`. Each walk has `rwalk_K // batch_size` steps. The first valid candidate among the batch is selected as the replacement. This parallelizes likelihood evaluation on GPU without introducing sampling bias (each walk is independently correct).
 
+Walk keys are sharded across available GPUs via `NamedSharding` using `gcd(batch_size, num_devices)` devices, spreading memory evenly. Controlled by `CUDA_VISIBLE_DEVICES` for device selection.
+
 ## Registry / Factory Pattern
 
 Samplers and bounds use string-based lookup:
