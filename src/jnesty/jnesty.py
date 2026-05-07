@@ -48,6 +48,10 @@ class NestedSampler:
         Controls periodic bound refitting. Default: None (automatic).
     max_ellipsoids : int, optional
         Maximum ellipsoids for multi-ellipsoid. Default: 20
+    batch_size : int, optional
+        Number of proposals per walk step for GPU-parallel likelihood
+        evaluation. batch_size > 1 evaluates multiple likelihoods in
+        parallel via vmap. Default: 1 (sequential, backward compatible).
     """
 
     def __init__(
@@ -65,6 +69,7 @@ class NestedSampler:
         bound: str = 'none',
         bound_update_interval: Optional[Union[int, float]] = None,
         max_ellipsoids: int = 20,
+        batch_size: int = 1,
     ):
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
@@ -76,6 +81,7 @@ class NestedSampler:
         self.verbose = verbose
         self.bound = bound
         self.max_ellipsoids = max_ellipsoids
+        self.batch_size = batch_size
 
         # Resolve bound_update_interval
         if bound_update_interval is None:
@@ -163,6 +169,7 @@ class NestedSampler:
             bound=self.bound,
             bound_update_interval=self.bound_update_interval,
             max_ellipsoids=self.max_ellipsoids,
+            batch_size=self.batch_size,
         )
 
         key = random.PRNGKey(42)

@@ -42,6 +42,7 @@ class WhileLoopNSConfig(NamedTuple):
     bound: str = 'none'
     bound_update_interval: int = 0
     max_ellipsoids: int = 20
+    batch_size: int = 1
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -138,7 +139,8 @@ def run_nested_sampling(
                           max_ellipsoids=config.max_ellipsoids,
                           scale=config.rwalk_step_scale)
     sampler_obj = get_sampler('rwalk', ndim,
-                              target_acceptance=config.target_acceptance)
+                              target_acceptance=config.target_acceptance,
+                              batch_size=config.batch_size)
 
     # Fit initial bound
     if config.bound != 'none':
@@ -253,7 +255,11 @@ def run_nested_sampling(
         )
 
         # 4. Adaptive scale tuning
-        current_acceptance = iter_acceptance / rwalk_K
+        if config.batch_size > 1:
+            steps_per_walk = max(1, rwalk_K // config.batch_size)
+        else:
+            steps_per_walk = rwalk_K
+        current_acceptance = iter_acceptance / steps_per_walk
         new_scale = sampler_obj.tune(scale, current_acceptance, ndim, iteration)
 
         # 5. Update live points
@@ -285,7 +291,7 @@ def run_nested_sampling(
             dlz_buf_new, scale_buf_new,
             logZ_new, delta_logZ_new,
             iteration + 1, key, new_scale,
-            state[11] + iter_acceptance, state[12] + rwalk_K,
+            state[11] + iter_acceptance, state[12] + max(1, rwalk_K // config.batch_size),
             bound_axes, schedule,
             me_axes_state, state[16],
             state[17],
