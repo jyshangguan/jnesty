@@ -45,6 +45,7 @@ NestedSampler(
     bound='none',         # 'none', 'single', 'multi'
     bound_update_interval=None,  # None=auto (nlive for multi, 0 otherwise)
     max_ellipsoids=20,    # int: max ellipsoids for multi-ellipsoid
+    batch_size=None,      # int or None: parallel walks (auto: rwalk_K // max(2, rwalk_K*10//nlive))
 )
 ```
 
@@ -124,6 +125,9 @@ Multi-ellipsoid uses recursive k-means splitting with BIC selection. It requires
 - **rwalk_step_scale**: Start at 1.0. Adapted automatically via Robbins-Munro.
 - **target_acceptance**: 0.5 is Dynesty's default. Lower values explore more aggressively.
 - **delta_logZ_threshold**: 0.01 is standard. Use 0.1 for quick tests, 0.001 for publication.
+- **batch_size**: Auto-tuned to `rwalk_K // max(2, rwalk_K * 10 // nlive)`. Runs `batch_size`
+  independent walks in parallel via `jax.vmap`, each with `rwalk_K // batch_size` steps. Set to
+  1 to disable parallelism. Larger values benefit expensive likelihoods on GPU.
 
 ## Plotting
 

@@ -73,6 +73,7 @@ class WhileLoopNSConfig(NamedTuple):
     bound: str = 'none'
     bound_update_interval: int = 0
     max_ellipsoids: int = 20
+    batch_size: int = 1
 ```
 
 ### WhileLoopNSResult (sampler.py)
@@ -175,7 +176,17 @@ Throttled to every 100 iterations to avoid overhead.
 final_state, _ = lax.scan(walk_step, init_state, jnp.arange(n_steps))
 ```
 
-Used in `RWalkSampler.sample()` for the random walk.
+Used in `_single_walk()` (internal_samplers.py) for each individual random walk.
+
+### jax.vmap for parallel walks
+
+```python
+# batch_size independent walks from same starting point, different keys
+vmapped_walk = jax.vmap(lambda wk: _single_walk(wk, x_start, ...))
+x_candidates, n_accepted_arr = vmapped_walk(walk_keys)
+```
+
+When `batch_size > 1`, `RWalkSampler.sample()` runs `batch_size` independent walks in parallel via `jax.vmap`. Each walk has `rwalk_K // batch_size` steps. The first valid candidate among the batch is selected as the replacement. This parallelizes likelihood evaluation on GPU without introducing sampling bias (each walk is independently correct).
 
 ## Registry / Factory Pattern
 

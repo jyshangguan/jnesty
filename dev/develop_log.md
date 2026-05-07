@@ -452,3 +452,39 @@ Separated 5D bimodal: periodic updates correctly find 2 ellipsoids.
 **Last Updated:** 2026-05-06
 **Status:** Multi-ellipsoid bounding complete. Traced-state integration avoids re-JIT. Validated on 3 problem types.
 **Key Achievement:** JAXNS outperforms Dynesty at 100D (18% faster)
+
+---
+
+## Task 015: GPU-Parallel Likelihood Evaluation
+
+### 2026-05-07 - Parallel Walks for GPU Likelihood Parallelism
+
+**Goal:** Parallelize likelihood evaluation on GPU for expensive likelihood functions.
+
+**Approaches tested:**
+1. **Batched proposals per walk step** (abandoned): Generate B proposals from current position, evaluate B likelihoods via vmap, accept first valid. Introduced systematic logZ bias (~+1.4 at batch_size=16) from preferentially selecting higher-logL replacements.
+2. **Parallel independent walks** (adopted): Run batch_size independent walks from the same starting point, each with `rwalk_K // batch_size` steps, vmapped across GPU. Select first valid replacement among candidates. Each walk is independently correct — no bias.
+
+**Auto-tuning formula:**
+```python
+batch_size = rwalk_K // max(2, rwalk_K * 10 // nlive)
+```
+Scales with nlive: more live points → less decorrelation needed per replacement → more parallelism allowed. Floor of 2 steps per walk ensures minimal decorrelation.
+
+**Examples:**
+- nlive=500, K=25: batch=12 (2 steps/walk)
+- nlive=500, K=120 (100D): batch=60 (2 steps/walk)
+- nlive=50, K=25: batch=5 (5 steps/walk)
+
+**Validation (5D Gaussian, delta_logZ < 0.001):**
+
+| batch_size | logZ     | err from analytical (-6.918) |
+|-----------|----------|-------------------------------|
+| 1         | -6.901   | +0.018                        |
+| 4         | -7.106   | -0.188                        |
+| 8         | -6.755   | +0.163                        |
+| 16        | -6.979   | -0.061                        |
+
+All within Monte Carlo uncertainty. No systematic bias.
+
+**Files:** `internal_samplers.py` (core: `_single_walk()`, `_propose_one()`, parallel walks), `sampler.py` (batch_size config + acceptance counting), `jnesty.py` (public API + auto-tuning)
