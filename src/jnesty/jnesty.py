@@ -75,6 +75,9 @@ class NestedSampler:
         max_ellipsoids: int = 20,
         batch_size: Optional[int] = None,
         memory_frac: float = 0.9,
+        unit_cube_batch_size: int = 200,
+        min_eff: float = 10.0,
+        min_ncall: Optional[int] = None,
     ):
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
@@ -87,6 +90,9 @@ class NestedSampler:
         self.bound = bound
         self.max_ellipsoids = max_ellipsoids
         self.memory_frac = memory_frac
+        self.unit_cube_batch_size = unit_cube_batch_size
+        self.min_eff = min_eff
+        self.min_ncall = min_ncall
 
         # Resolve bound_update_interval
         if bound_update_interval is None:
@@ -184,6 +190,9 @@ class NestedSampler:
             max_ellipsoids=self.max_ellipsoids,
             batch_size=self.batch_size,
             memory_frac=self.memory_frac,
+            unit_cube_batch_size=self.unit_cube_batch_size,
+            min_eff=self.min_eff,
+            min_ncall=self.min_ncall,
         )
 
         key = random.PRNGKey(42)

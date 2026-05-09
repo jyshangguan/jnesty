@@ -521,3 +521,40 @@ Investigated annealed nested sampling (temperature parameter) to help find sharp
 **Root cause:** Nested sampling weights depend on the prior mass compression rate matching the likelihood evolution. Temperature disrupts this relationship — it changes which points are removed and in what order, which corrupts both the evidence AND the posterior weights. This is fundamental to how NS works, not a fixable implementation issue.
 
 All annealing code rolled back. No temperature parameter in current codebase.
+
+---
+
+## Milestone 7: Dynesty-Matching Fixes (Task 002)
+
+### 2026-05-09 - Systematic Comparison & Bug Fixes
+
+**Completed a systematic comparison of JNesty vs Dynesty's rwalk+multi-ellipsoid implementation**, identifying and fixing 4 remaining differences. Comparison documented in `dev/task_002_jnesty_dynesty_comparison/notes.md`.
+
+**Fixes implemented:**
+
+1. **Scale history reset (HIGH impact):** Dynesty resets n_accept/n_reject counters after each scale update (when queue empties). JNesty accumulated indefinitely, making scale increasingly unresponsive. Now resets `hist_accept`/`hist_total` to 0 at each bound update in the chunked loop.
+
+2. **Per-walk ellipsoid selection (MODERATE impact):** Dynesty selects one ellipsoid per walk via `get_random_axes()` and uses the same axes for all K steps. JNesty was switching ellipsoids per step via `walk_schedule`. Now selects one ellipsoid randomly (volume-weighted) per walk. Each batch walk gets its own ellipsoid.
+
+3. **Diverse batch starting points (MODERATE impact):** Dynesty's queue picks different starting points for each entry. JNesty's batch started all walks from the same `x_current`. Now each batch walk starts from a different randomly selected live point above loglstar.
+
+4. **Minimum steps per walk (MODERATE impact):** With batch_size=57 and rwalk_K=57 (37D), each walk had only 1 step — effectively rejection sampling, not a random walk. Now caps `batch_size = rwalk_K // min_steps` with `min_steps=5` to ensure proper multi-step walks.
+
+**Additional fixes in this session:**
+
+- **Phase 1 call counting bug:** Phase 1 was counting all 200 batch proposals as ncall instead of just `first_valid + 1`. This caused premature exit (95 iterations instead of ~7800 for 37D), leaving live points poorly distributed. Fixed by counting only actual proposals used.
+
+- **Removed dead code:** Eliminated ~200 lines of dead code after `return` statement in sampler.py.
+
+- **batch_size consistency:** Fixed `sampler_obj.batch_size` not matching the capped batch_size (sampler_obj was created before capping).
+
+**Files changed:** `src/jnesty/sampler.py` (two-phase sampling, 4 fixes, dead code removal), `src/jnesty/internal_samplers.py` (diverse starting points + per-walk axes), `src/jnesty/jnesty.py` (new config params), `pyproject.toml`
+
+**Demo test results (all 4 pass):**
+
+| Demo | logZ | Speed |
+|------|------|-------|
+| 1: Multimodal 5D | -6.83 | 75.5 it/s |
+| 2: Rosenbrock 2D | -4.40 | 75.0 it/s |
+| 3: 20D Gaussian | -27.43 ± 0.19 (analytical: -27.67) | ~70 it/s |
+| 4: Gaussian Shells 2D | -1.82 | 69.6 it/s |

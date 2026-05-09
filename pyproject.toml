@@ -19,6 +19,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dynesty = ["dynesty"]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: tests involving JAX JIT compilation or GPU (deselect with '-m \"not slow\"')",
+]
+addopts = "-m 'not slow' --tb=short -q"
 
 [tool.setuptools.packages.find]
 where = ["src"]
