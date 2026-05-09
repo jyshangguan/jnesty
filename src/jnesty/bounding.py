@@ -111,14 +111,16 @@ class MultiEllipsoidBound(Bound):
     Stores state as a MultiEllipsoidState NamedTuple for JAX compatibility.
     """
 
-    def __init__(self, ndim, max_ellipsoids=20, **kwargs):
+    def __init__(self, ndim, max_ellipsoids=20, enlarge=1.25, **kwargs):
         super().__init__(ndim, **kwargs)
         self.max_ellipsoids = max_ellipsoids
+        self.enlarge = enlarge
         self.state: Optional[MultiEllipsoidState] = None
 
     def fit(self, points):
         """Fit multi-ellipsoid decomposition to live points."""
-        self.state = fit_multi_ellipsoid(points, max_ellipsoids=self.max_ellipsoids)
+        self.state = fit_multi_ellipsoid(
+            points, max_ellipsoids=self.max_ellipsoids, enlarge=self.enlarge)
         return self
 
     def sample(self, key, n=1):

@@ -131,6 +131,18 @@ def estimate_batch_size_from_memory(
     return capped
 
 
+def _batch_logL_eval(loglikelihood_fn, live_x, batch_size=50):
+    """Evaluate logL for all live points in batches to avoid OOM."""
+    nlive = live_x.shape[0]
+    if nlive <= batch_size:
+        return jnp.vectorize(loglikelihood_fn, signature='(n)->()')(live_x)
+    results = []
+    for i in range(0, nlive, batch_size):
+        batch = live_x[i:i + batch_size]
+        results.append(jnp.vectorize(loglikelihood_fn, signature='(n)->()')(batch))
+    return jnp.concatenate(results)
+
+
 def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
                        worst_logL_buffer, delta_logZ_buffer, scale_buffer,
                        logZ, delta_logZ, iteration_offset, key, nlive,
@@ -305,7 +317,7 @@ def run_nested_sampling(
     # Initialize live points from prior
     keys = random.split(key, nlive + 1)
     live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
-    live_logL = jnp.vectorize(loglikelihood_for_jit, signature='(n)->()')(live_x)
+    live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
 
     # Pre-allocate buffers — use dtype matching the likelihood output
     buf_dtype = live_logL.dtype
@@ -386,12 +398,8 @@ def run_nested_sampling(
             else:
                 bound_obj.fit(live_x)
 
-        # Memory-cap batch_size (also enforce minimum steps per walk)
+        # Memory-cap batch_size
         bound_axes_for_probe = bound_obj.get_axes()
-        min_steps_per_walk = 5
-        max_batch_for_steps = max(1, rwalk_K // min_steps_per_walk)
-        capped_batch = min(config.batch_size, max_batch_for_steps)
-        config = config._replace(batch_size=capped_batch)
 
         effective_batch_size = estimate_batch_size_from_memory(
             loglikelihood_fn=loglikelihood_for_jit,
@@ -399,7 +407,7 @@ def run_nested_sampling(
             bound_axes=bound_axes_for_probe,
             ndim=ndim,
             rwalk_K=rwalk_K,
-            requested_batch_size=capped_batch,
+            requested_batch_size=config.batch_size,
             memory_frac=config.memory_frac,
             verbose=config.verbose,
         )
@@ -409,6 +417,11 @@ def run_nested_sampling(
                                   target_acceptance=config.target_acceptance,
                                   batch_size=effective_batch_size,
                                   ncdim=config.ncdim if config.ncdim else ndim)
+
+        # The sampler may round batch_size down for GPU sharding (multiple of n_devices).
+        # Use the actual batch_size from the sampler for all downstream code.
+        effective_batch_size = sampler_obj.batch_size
+        config = config._replace(batch_size=effective_batch_size)
 
         # === PHASE 2: Rwalk with adaptive bounding ===
         if config.verbose:
@@ -648,7 +661,7 @@ def run_nested_sampling(
 
                 # Refit multi-ellipsoid
                 live_x_cur = current_state[0]
-                me_state = fit_multi_ellipsoid(live_x_cur, max_ellipsoids=max_ellipsoids)
+                me_state = fit_multi_ellipsoid(live_x_cur, max_ellipsoids=max_ellipsoids, enlarge=1.25)
 
                 if config.verbose and total_done % (bound_update_interval * 5) < bound_update_interval:
                     print(f"  Iter {total_done}: refit multi-ellipsoid -> {me_state.n_active} ellipsoid(s), "

@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 from jax import random, lax
 from typing import Optional
-from jax.sharding import PartitionSpec as P, Mesh, NamedSharding
 
 from .utils import randsphere
 
@@ -138,7 +137,8 @@ def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
 
         in_bounds = in_unit_cube & in_prior
 
-        # Evaluate logL only if in bounds
+        # Evaluate logL (branchless jnp.where for XLA fusion — lax.cond with
+        # data-dependent predicate inside lax.scan kills GPU kernel fusion).
         logL_proposed = jnp.where(
             in_bounds,
             loglikelihood_fn(x_proposed),
@@ -179,22 +179,11 @@ class RWalkSampler(InternalSampler):
         self.batch_size = batch_size
         self.ncdim = ncdim if ncdim is not None else ndim
 
-        # Shard parallel walks across available GPUs for even memory usage
-        devices = jax.devices()
-        n_devices = len(devices)
-        if batch_size > 1 and n_devices > 1:
-            # Round down to nearest multiple of n_devices for even sharding
-            effective_batch = (batch_size // n_devices) * n_devices
-            if effective_batch >= n_devices:
-                self.batch_size = effective_batch
-                self._mesh = Mesh(devices, ('walks',))
-                self._sharding = NamedSharding(self._mesh, P('walks'))
-            else:
-                self._mesh = None
-                self._sharding = None
-        else:
-            self._mesh = None
-            self._sharding = None
+        # GPU sharding: disabled by default — vmap already parallelizes across devices.
+        # Explicit sharding with Mesh/NamedSharding adds overhead for small batch sizes
+        # and can conflict with the sampler's batch_size expectations.
+        self._mesh = None
+        self._sharding = None
 
     def sample(self, key, x_starts, logL_constraint, loglikelihood_fn,
                axes, scale, n_steps, prior_bounds=None,
@@ -229,10 +218,6 @@ class RWalkSampler(InternalSampler):
             # Parallel walks: B walks with n_steps // B steps each
             steps_per_walk = max(1, n_steps // batch_size)
             walk_keys = random.split(key, batch_size)
-
-            # Distribute across GPUs for even memory usage
-            if self._sharding is not None:
-                walk_keys = jax.device_put(walk_keys, self._sharding)
 
             # vmap the walk across batch_size starting points + per-walk axes
             vmapped_walk = jax.vmap(

@@ -125,12 +125,13 @@ class NestedSampler:
         self.rwalk_K = rwalk_K
         self.rwalk_step_scale = rwalk_step_scale
 
-        # Auto-tune batch_size
+        # Auto-tune batch_size: target ~2 steps per walk for good GPU utilization.
+        # batch_size = rwalk_K // 2 gives 2 steps/walk with ~28 parallel walks.
         if batch_size is None:
-            batch_size = rwalk_K // max(1, rwalk_K * 10 // nlive)
+            batch_size = max(1, rwalk_K // 2)
             if verbose:
                 print(f"Auto-tuned batch_size = {batch_size} "
-                      f"(rwalk_K={rwalk_K}, nlive={nlive})")
+                      f"(rwalk_K={rwalk_K}, ~{max(1, rwalk_K // batch_size)} steps/walk)")
         self.batch_size = batch_size
 
         if device == 'cpu':

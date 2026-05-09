@@ -258,7 +258,7 @@ def _fit_multi_ellipsoid_core(points, max_ellipsoids):
     return centers_f, covs_f, axes_f, precs_f, logvols_f, n_active
 
 
-def fit_multi_ellipsoid(points, max_ellipsoids=20):
+def fit_multi_ellipsoid(points, max_ellipsoids=20, enlarge=1.25):
     """
     Fit a set of bounding ellipsoids using recursive k-means splitting.
 
@@ -267,12 +267,14 @@ def fit_multi_ellipsoid(points, max_ellipsoids=20):
     2. Split into 2 clusters via k-means along major axis
     3. Accept split if BIC criterion satisfied
     4. Recursively split sub-clusters
+    5. Enlarge all ellipsoids by the given factor (matches Dynesty's bound_enlarge)
 
     JIT-compiled internally using masked operations and lax.while_loop.
 
     Args:
         points: (npoints, ndim) live points
         max_ellipsoids: maximum number of ellipsoids
+        enlarge: volume enlargement factor (default 1.25, matches Dynesty)
 
     Returns:
         MultiEllipsoidState with fitted ellipsoids
@@ -280,6 +282,17 @@ def fit_multi_ellipsoid(points, max_ellipsoids=20):
     centers, covs, axes, precs, logvols, n_active = _fit_multi_ellipsoid_core(
         points, max_ellipsoids
     )
+
+    # Apply enlarge factor (matches Dynesty's bound_enlarge=1.25)
+    # Scale axes so volume increases by `enlarge`: axes *= enlarge^(1/(2*ndim))
+    if enlarge != 1.0:
+        ndim = points.shape[1]
+        scale = enlarge ** (1.0 / (2.0 * ndim))
+        axes = axes * scale
+        covs = covs * (scale ** 2)
+        precs = precs / (scale ** 2)
+        logvols = logvols + jnp.log(enlarge)
+
     return MultiEllipsoidState(
         centers=centers,
         covs=covs,
