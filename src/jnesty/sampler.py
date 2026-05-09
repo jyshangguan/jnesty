@@ -473,63 +473,77 @@ def run_nested_sampling(
             worst_idx = jnp.argmin(live_logL)
             worst_logL = live_logL[worst_idx]
 
-            # 2. Pick starting point(s) from live points above loglstar
-            above_mask = live_logL > worst_logL
-            n_above = jnp.sum(above_mask)
-            key, subkey1, subkey2, subkey3, subkey4 = random.split(key, 5)
+            # 2-4. Retry loop: select starting point, ellipsoid, run walk.
+            # Retry with fresh randomness until a valid point (logL > loglstar)
+            # is found, matching Dynesty's _new_point() while-True behavior.
+            key, retry_key = random.split(key)
 
-            # Uniform selection among above-loglstar points
-            rand_vals = random.uniform(subkey1, (live_x.shape[0],))
-            rand_vals = jnp.where(above_mask, rand_vals, -1.0)
-            idx_above = jnp.argmax(rand_vals)
-            idx_fallback = random.randint(subkey2, (), 0, live_x.shape[0])
-            idx = jnp.where(n_above > 0, idx_above, idx_fallback)
-            x_current = live_x[idx]
+            _bound_axes = state[13]
 
-            # For batch mode: select diverse starting points
-            if effective_batch_size > 1:
-                above_probs = above_mask.astype(jnp.float32)
-                above_probs = above_probs / jnp.maximum(above_probs.sum(), 1)
-                batch_idxs = random.choice(subkey4, live_x.shape[0],
-                                           shape=(effective_batch_size,),
-                                           p=above_probs, replace=True)
-                x_starts = live_x[batch_idxs]  # (batch_size, ndim)
-            else:
-                x_starts = x_current
+            def _retry_cond(rstate):
+                return ~rstate[0]  # while not valid
 
-            # 3. Select axes for this walk
-            if use_multi_ellipsoid:
-                # Per-walk ellipsoid selection (matches Dynesty)
-                logvol = me_axes_state.shape[0]  # n_ellipsoids
-                ell_log_probs = me_logvol_ells - jax.scipy.special.logsumexp(me_logvol_ells)
-                ell_probs = jnp.exp(ell_log_probs)
-                ell_probs = jnp.where(jnp.isnan(ell_probs) | (ell_probs < 0), 0.0, ell_probs)
-                ell_probs = ell_probs / jnp.maximum(ell_probs.sum(), 1e-30)
+            def _retry_body(rstate):
+                _, rkey, _, _, racc, rtot = rstate
+                rkey, sk1, sk2, sk3, sk4, wk = random.split(rkey, 6)
+
+                # Select starting point(s)
+                above_mask = live_logL > worst_logL
+                n_above = jnp.sum(above_mask)
+                rand_vals = random.uniform(sk1, (live_x.shape[0],))
+                rand_vals = jnp.where(above_mask, rand_vals, -1.0)
+                idx_above = jnp.argmax(rand_vals)
+                idx_fallback = random.randint(sk2, (), 0, live_x.shape[0])
+                idx = jnp.where(n_above > 0, idx_above, idx_fallback)
+                x_current = live_x[idx]
 
                 if effective_batch_size > 1:
-                    # Each batch walk gets its own ellipsoid
-                    ell_indices = random.choice(subkey3, logvol,
-                                                shape=(effective_batch_size,),
-                                                p=ell_probs, replace=True)
-                    walk_axes = me_axes_state[ell_indices]  # (batch_size, ncdim, ncdim)
+                    above_probs = above_mask.astype(jnp.float32)
+                    above_probs = above_probs / jnp.maximum(above_probs.sum(), 1)
+                    batch_idxs = random.choice(sk4, live_x.shape[0],
+                                               shape=(effective_batch_size,),
+                                               p=above_probs, replace=True)
+                    x_starts = live_x[batch_idxs]
                 else:
-                    ell_idx = random.choice(subkey3, logvol, p=ell_probs)
-                    walk_axes = me_axes_state[ell_idx]  # (ncdim, ncdim)
-                ba = walk_axes
-                ws = None  # No per-step schedule
-            else:
-                ba = state[13]  # bound_axes (single ellipsoid)
-                ws = None
+                    x_starts = x_current
 
-            # 4. Run random walk via sampler
-            key, walk_key = random.split(key)
+                # Select axes
+                if use_multi_ellipsoid:
+                    logvol = me_axes_state.shape[0]
+                    ell_log_probs = me_logvol_ells - jax.scipy.special.logsumexp(me_logvol_ells)
+                    ell_probs = jnp.exp(ell_log_probs)
+                    ell_probs = jnp.where(jnp.isnan(ell_probs) | (ell_probs < 0), 0.0, ell_probs)
+                    ell_probs = ell_probs / jnp.maximum(ell_probs.sum(), 1e-30)
+                    if effective_batch_size > 1:
+                        ell_indices = random.choice(sk3, logvol,
+                                                    shape=(effective_batch_size,),
+                                                    p=ell_probs, replace=True)
+                        ba = me_axes_state[ell_indices]
+                    else:
+                        ell_idx = random.choice(sk3, logvol, p=ell_probs)
+                        ba = me_axes_state[ell_idx]
+                else:
+                    ba = _bound_axes
 
-            x_new, logL_new, iter_accepted, iter_total = sampler_obj.sample(
-                walk_key, x_starts, worst_logL, loglikelihood_for_jit,
-                ba, scale, rwalk_K,
-                prior_bounds=config.prior_bounds if has_prior_bounds else None,
-                walk_schedule=ws,
+                x_cand, logL_cand, n_acc, n_tot = sampler_obj.sample(
+                    wk, x_starts, worst_logL, loglikelihood_for_jit,
+                    ba, scale, rwalk_K,
+                    prior_bounds=config.prior_bounds if has_prior_bounds else None,
+                    walk_schedule=None,
+                )
+                valid = logL_cand > worst_logL
+                return (valid, rkey, x_cand, logL_cand, racc + n_acc, rtot + n_tot)
+
+            _init_retry = (
+                jnp.array(False),                          # valid
+                retry_key,                                 # key
+                jnp.zeros(ndim, dtype=live_x.dtype),      # x_new placeholder
+                jnp.array(-jnp.inf, dtype=live_logL.dtype), # logL_new placeholder
+                jnp.array(0, dtype=jnp.int32),             # acc
+                jnp.array(0, dtype=jnp.int32),             # tot
             )
+            _, _, x_new, logL_new, iter_accepted, iter_total = lax.while_loop(
+                _retry_cond, _retry_body, _init_retry)
 
             # 5. Accumulate accept/total history and adapt scale
             hist_accept = state[11] + iter_accepted

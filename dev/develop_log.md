@@ -558,3 +558,11 @@ All annealing code rolled back. No temperature parameter in current codebase.
 | 2: Rosenbrock 2D | -4.40 | 75.0 it/s |
 | 3: 20D Gaussian | -27.43 ± 0.19 (analytical: -27.67) | ~70 it/s |
 | 4: Gaussian Shells 2D | -1.82 | 69.6 it/s |
+
+### 2026-05-09 - Add Retry Loop for Valid Point Guarantee
+
+Added a `lax.while_loop` around the walk section of body_fn to guarantee every NS iteration installs a replacement point with `logL > loglstar`. Matches Dynesty's `_new_point()` while-True behavior.
+
+The retry loop re-selects starting point, ellipsoid, and re-runs the walk with fresh randomness on each attempt. In practice, retries are extremely rare (walks starting from above-loglstar points almost always produce valid candidates).
+
+Demo 3 (20D Gaussian) improved from logZ difference 0.24 to 0.05 from analytical. Speed reduced from ~70 to ~50 it/s for 5D/20D due to retry loop overhead (2D unaffected at ~70 it/s).
