@@ -143,7 +143,7 @@ Each demo has a JNesty variant (`*_jnesty.py`) and a dynesty variant
 
 ## Acknowledgments
 
-This package was developed with [Claude Code](https://claude.com/claude-code), powered by the GLM 5.1 model.
+This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
 
 ## License
 
