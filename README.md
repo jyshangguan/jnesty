@@ -147,13 +147,7 @@ Each demo has a JNesty variant (`*_jnesty.py`) and a dynesty variant
 
 ## Acknowledgments
 
-JNesty's sampling algorithms and bounding methods closely follow the
-[dynesty](https://dynesty.readthedocs.io/) nested sampling package. We gratefully
-acknowledge the dynesty authors for their well-documented, battle-tested
-implementations that served as the primary reference for this work.
-
-We are also inspired by [jaxns](https://github.com/Joshuaalbert/jaxns) to use
-JAX to accelerate nested sampling on GPU.
+JNesty's sampling algorithms and bounding methods closely follow the [dynesty](https://github.com/joshspeagle/dynesty) nested sampling package. We are also inspired by [JAXNS](https://github.com/Joshuaalbert/jaxns) to use JAX to accelerate nested sampling on GPU. We gratefully acknowledge the authors for their well-documented, battle-tested implementations that served as the primary reference for this work.
 
 This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
 
