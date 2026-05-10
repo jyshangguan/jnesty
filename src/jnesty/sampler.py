@@ -357,7 +357,7 @@ def run_nested_sampling(
         pbar.n = phase1_iters
         loglstar_p1 = float(jnp.min(live_logL))
         pbar.set_postfix_str(
-            f'logZ: {float(logZ):.2f} | dlogZ: {float(delta_logZ):.3f} | '
+            f'logZ: {float(logZ):.2f} | dlogZ: {float(delta_logZ):.3f} ({delta_logZ_threshold}) | '
             f'logl*: {loglstar_p1:.1f} | eff(%): {phase1_eff:.1f}')
         pbar.refresh()
 
@@ -748,7 +748,7 @@ def run_nested_sampling(
                         else:
                             loglstar_str = f'{loglstar_val:.1f}'
                         pbar.set_postfix_str(
-                            f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} | '
+                            f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} ({delta_logZ_threshold}) | '
                             f'logl*: {loglstar_str} | eff(%): {float(eff):.1f}')
                         pbar.refresh()
 
@@ -864,7 +864,7 @@ def run_nested_sampling(
                     else:
                         loglstar_str = f'{loglstar_val:.1f}'
                     pbar.set_postfix_str(
-                        f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} | '
+                        f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} ({delta_logZ_threshold}) | '
                         f'logl*: {loglstar_str} | eff(%): {float(eff):.1f}')
                     pbar.refresh()
 
