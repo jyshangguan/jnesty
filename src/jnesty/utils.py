@@ -47,3 +47,29 @@ def _convert_to_numpy(arr):
         return arr
     else:
         return np.asarray(arr)
+
+
+def mean_and_cov(samples, weights):
+    """
+    Compute weighted mean and covariance (matches Dynesty's dyutils.mean_and_cov).
+
+    Parameters
+    ----------
+    samples : array, shape (nsamples, ndim)
+        Parameter samples.
+    weights : array, shape (nsamples,)
+        Importance weights.
+
+    Returns
+    -------
+    mean : array, shape (ndim,)
+        Weighted sample mean.
+    cov : array, shape (ndim, ndim)
+        Weighted sample covariance with Bessel-like correction.
+    """
+    mean = np.average(samples, weights=weights, axis=0)
+    dx = samples - mean
+    wsum = np.sum(weights)
+    w2sum = np.sum(weights ** 2)
+    cov = wsum / (wsum ** 2 - w2sum) * np.einsum('i,ij,ik', weights, dx, dx)
+    return mean, cov
