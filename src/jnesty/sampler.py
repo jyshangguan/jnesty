@@ -804,9 +804,13 @@ def run_nested_sampling(
 
                 if config.verbose:
                     calls_now = int(current_state[17])
-                    print(f"  Iter {total_done} ({calls_now} calls): refit multi-ellipsoid -> "
-                          f"{me_state.n_active} ellipsoid(s), "
-                          f"logZ={float(current_state[6]):.2f}, dlogZ={delta_logZ_val:.3f}")
+                    msg = (f"  Iter {total_done} ({calls_now} calls): refit multi-ellipsoid -> "
+                           f"{me_state.n_active} ellipsoid(s), "
+                           f"logZ={float(current_state[6]):.2f}, dlogZ={delta_logZ_val:.3f}")
+                    if pbar is not None:
+                        pbar.write(msg)
+                    else:
+                        print(msg)
 
                 # Repack with updated multi-ellipsoid state
                 # Reset scale history so scale adapts to new axes quickly

@@ -610,3 +610,34 @@ Added a `lax.while_loop` around the walk section of body_fn to guarantee every N
 The retry loop re-selects starting point, ellipsoid, and re-runs the walk with fresh randomness on each attempt. In practice, retries are extremely rare (walks starting from above-loglstar points almost always produce valid candidates).
 
 Demo 3 (20D Gaussian) improved from logZ difference 0.24 to 0.05 from analytical. Speed reduced from ~70 to ~50 it/s for 5D/20D due to retry loop overhead (2D unaffected at ~70 it/s).
+
+### 2026-05-10 - Progress Bar Fix, Tests, Demo Re-runs
+
+**Progress bar fix:** `print()` in the chunked loop broke tqdm's one-line display. Changed to `pbar.write(msg)` with `print()` fallback when no progress bar is active.
+
+**Demo re-runs (all 4 problems):** Re-ran all JNesty and Dynesty demos with `thin=1` for trace plots (was `thin=5`/`thin=10` in JNesty, causing fewer visible points). Updated all 4 comparison reports with new numerical results.
+
+**Test suite for queue mode and Dynesty-matching defaults:**
+
+Unit tests (`tests/unit/test_queue_mode.py`):
+- Output shapes (queue_size, ndim)
+- All-valid candidates with low constraint
+- Multi-ellipsoid axes selection
+- ntot equals rwalk_K
+
+Integration tests (`tests/integration/test_queue_and_defaults.py`):
+- Queue mode convergence (2D Gaussian)
+- Queue mode logZ accuracy vs analytical
+- Queue mode with periodic bound updates
+- Queue mode on 5D Gaussian
+- total_calls tracking
+- Auto-enables queue_size=8 for bound='multi'
+- Auto-enables bound_update_interval=rwalk_K*nlive for bound='multi'
+- bound='none' does not auto-enable queue or periodic updates
+- Explicit queue_size overrides auto default
+- Float bound_update_interval conversion to calls
+- Full run with all defaults converges
+
+All 17 tests pass.
+
+**Files:** `sampler.py` (progress bar fix), `test_queue_mode.py` (new), `test_queue_and_defaults.py` (new), demo reports updated

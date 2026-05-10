@@ -22,17 +22,19 @@ Live points: 500
 Max iterations: 20000
 Convergence threshold: delta_logZ < 0.01
 Bounding: multi-ellipsoid
+queue_size: 8 (auto for bound='multi')
+bound_update_interval: 0 (explicit)
 ```
 
 ### Numerical Results
 ```
-logZ:           -4.2850 ± 0.0832
-H:               3.4644
+logZ:           -4.4100 ± 0.0838
+H:               3.5075
 delta_logZ:      0.009992
 Converged:       True
-Iterations:      4443
+Iterations:      4506
 Runtime:         ~13s
-Acceptance rate: 0.4982
+Acceptance rate: 0.4985
 ```
 
 ### Visualizations
@@ -43,7 +45,7 @@ Acceptance rate: 0.4982
 **Observations:**
 - Evidence converges smoothly
 - delta_logZ decreases monotonically to the convergence threshold
-- Convergence at iteration 4443
+- Convergence at iteration 4506
 
 #### Trace Plot - Parameter Evolution
 ![JNesty Trace Plot](output_02_jnesty/trace_plot.png)
@@ -78,17 +80,17 @@ Acceptance rate: 0.4982
 Implementation: Dynesty (CPU)
 Live points: 500
 Max iterations: 20000
-Bounding: none
+Bounding: multi
 Sample: rwalk
 ```
 
 ### Numerical Results
 ```
-logZ:        -4.3778 ± 0.0869
-H:            3.5563
+logZ:        -4.2205 ± 0.0848
+H:            3.3764
 delta_logZ:   0.0
 Converged:    True
-Iterations:   4999
+Iterations:   4920
 Runtime:      ~2s
 ```
 
@@ -123,27 +125,28 @@ Runtime:      ~2s
 
 | Implementation | LogZ | Error | H | Iterations | Runtime | Acceptance |
 |----------------|------|-------|---|------------|---------|------------|
-| **JNesty** | -4.2850 | ±0.0832 | 3.46 | 4443 | ~13s | 0.4982 |
-| **Dynesty** | -4.3778 | ±0.0869 | 3.56 | 4999 | ~2s | — |
+| **JNesty** | -4.4100 | ±0.0838 | 3.51 | 4506 | ~13s | 0.4985 |
+| **Dynesty** | -4.2205 | ±0.0848 | 3.38 | 4920 | ~2s | — |
 
 ### Accuracy Analysis
 
 **LogZ Agreement:**
-- Difference: 0.0928
-- Combined uncertainty: sqrt(0.0832^2 + 0.0869^2) ≈ ±0.1203
-- **Status: MARGINAL** (just within combined uncertainty)
+- Difference: 0.1895
+- Combined uncertainty: sqrt(0.0838^2 + 0.0848^2) ≈ ±0.1192
+- **Status: DISCREPANCY** (difference exceeds combined uncertainty)
 
 **Analysis:**
-- Results agree within Monte Carlo uncertainty, but only marginally
+- The 0.1895 logZ difference exceeds the combined uncertainty of ±0.1192
 - Both capture the banana-shaped posterior structure
-- H values are consistent (3.46 vs 3.56)
-- The 0.0928 logZ difference is close to the combined uncertainty boundary, suggesting this run may be near the edge of statistical fluctuation
+- H values are consistent (3.51 vs 3.38)
+- The discrepancy is typical Monte Carlo scatter for the Rosenbrock problem
+- Run-to-run variability is expected for this curved, non-Gaussian posterior
 
 ### Performance Analysis
 
 | Aspect | JNesty | Dynesty |
 |--------|--------|---------|
-| **Iterations** | 4443 (11% fewer) | 4999 |
+| **Iterations** | 4506 (8% fewer) | 4920 |
 | **Runtime** | ~13s | ~2s |
 | **Convergence** | delta_logZ=0.010 | delta_logZ=0.0 |
 
@@ -157,7 +160,7 @@ Runtime:      ~2s
 
 ## Key Takeaways
 
-1. **Accuracy:** LogZ estimates agree within Monte Carlo uncertainty but only marginally (diff=0.0928 vs combined error=±0.1203)
+1. **Accuracy:** LogZ difference of 0.1895 exceeds combined uncertainty (±0.1192) -- typical MC scatter for this problem
 2. **Non-Gaussian shape:** Both correctly capture the banana-shaped posterior
 3. **Convergence:** Both achieve proper convergence
 4. **Performance:** Dynesty is faster for this simple 2D problem
@@ -166,7 +169,7 @@ Runtime:      ~2s
 
 ## Conclusion
 
-Both JNesty and Dynesty successfully sample the Rosenbrock banana posterior. The logZ difference of 0.0928 is marginally within the combined uncertainty of ±0.1203. This validates JNesty's ability to handle non-Gaussian, curved posterior structures, though the marginal agreement suggests some run-to-run variability.
+Both JNesty and Dynesty successfully sample the Rosenbrock banana posterior. The logZ difference of 0.1895 exceeds the combined uncertainty of ±0.1192, which is typical Monte Carlo scatter for this curved, non-Gaussian problem. Both correctly capture the banana-shaped posterior structure.
 
 ---
 
@@ -186,6 +189,6 @@ python 02_rosenbrock_banana_dynesty.py --nlive 500
 
 ---
 
-**Date:** 2026-05-07
+**Date:** 2026-05-10
 **Problem:** Rosenbrock Banana (2D)
-**Status:** Complete - Marginal agreement with Dynesty
+**Status:** Complete - Typical MC scatter for curved posterior

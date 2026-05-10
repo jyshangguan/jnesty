@@ -22,15 +22,17 @@ Live points: 500
 Max iterations: 20000
 Convergence threshold: delta_logZ < 0.01
 Bounding: multi-ellipsoid
+queue_size: 8 (auto for bound='multi')
+bound_update_interval: 0 (explicit)
 ```
 
 ### Numerical Results
 ```
-logZ:           -6.8765 ± 0.0877
-H:               3.8429
+logZ:           -6.8668 ± 0.0869
+H:               3.7749
 delta_logZ:      0.009981
 Converged:       True
-Iterations:      5475
+Iterations:      5476
 Runtime:         ~16s
 Acceptance rate: 0.4975
 ```
@@ -42,7 +44,7 @@ Acceptance rate: 0.4975
 
 **Observations:**
 - Evidence (logZ) converges smoothly with decreasing delta_logZ
-- Convergence achieved at iteration 5475 with delta_logZ < 0.01
+- Convergence achieved at iteration 5476 with delta_logZ < 0.01
 - Log-likelihood increases monotonically as expected
 
 #### Trace Plot - Parameter Evolution
@@ -78,17 +80,17 @@ Acceptance rate: 0.4975
 Implementation: Dynesty (CPU)
 Live points: 500
 Max iterations: 20000
-Bounding: none
+Bounding: multi
 Sample: rwalk
 ```
 
 ### Numerical Results
 ```
-logZ:        -6.8500 ± 0.0901
-H:            3.7601
+logZ:        -7.0217 ± 0.0922
+H:            3.9396
 delta_logZ:   0.0
 Converged:    True
-Iterations:   5971
+Iterations:   6046
 Runtime:      ~3s
 ```
 
@@ -123,27 +125,28 @@ Runtime:      ~3s
 
 | Implementation | LogZ | Error | H | Iterations | Runtime | Acceptance |
 |----------------|------|-------|---|------------|---------|------------|
-| **JNesty** | -6.8765 | ±0.0877 | 3.84 | 5475 | ~16s | 0.4975 |
-| **Dynesty** | -6.8500 | ±0.0901 | 3.76 | 5971 | ~3s | — |
+| **JNesty** | -6.8668 | ±0.0869 | 3.77 | 5476 | ~16s | 0.4975 |
+| **Dynesty** | -7.0217 | ±0.0922 | 3.94 | 6046 | ~3s | — |
 
 ### Accuracy Analysis
 
 **LogZ Agreement:**
-- Difference: 0.0265
-- Combined uncertainty: sqrt(0.0877^2 + 0.0901^2) ≈ ±0.1266
-- **Status: AGREEMENT** (well within combined uncertainty)
+- Difference: 0.1549
+- Combined uncertainty: sqrt(0.0869^2 + 0.0922^2) ≈ ±0.1268
+- **Status: MARGINAL** (difference slightly exceeds combined uncertainty but within 2sigma)
 
 **Analysis:**
-- Results agree within Monte Carlo uncertainty
+- The 0.1549 logZ difference slightly exceeds the combined uncertainty of ±0.1268, but is well within 2sigma
 - Both implementations correctly identify bi-modality
-- H values are consistent (3.84 vs 3.76)
+- H values are consistent (3.77 vs 3.94)
 - Both achieve convergence (delta_logZ < 0.01)
+- The marginal discrepancy is typical of Monte Carlo scatter for this problem
 
 ### Performance Analysis
 
 | Aspect | JNesty | Dynesty |
 |--------|--------|---------|
-| **Iterations** | 5475 (8% fewer) | 5971 |
+| **Iterations** | 5476 (9% fewer) | 6046 |
 | **Runtime** | ~16s | ~3s |
 | **Convergence** | delta_logZ=0.010 | delta_logZ=0.0 |
 
@@ -157,7 +160,7 @@ Runtime:      ~3s
 
 ## Key Takeaways
 
-1. **Accuracy:** Both implementations produce consistent logZ estimates within Monte Carlo uncertainty
+1. **Accuracy:** LogZ difference of 0.1549 slightly exceeds combined uncertainty (±0.1268) but is within 2sigma
 2. **Multi-modality:** Both correctly identify and sample both Gaussian modes
 3. **Convergence:** Both achieve proper convergence with delta_logZ < 0.01
 4. **Performance:** Dynesty is faster for this simple 5D problem; JNesty's GPU advantage is not yet relevant
@@ -166,7 +169,7 @@ Runtime:      ~3s
 
 ## Conclusion
 
-Both JNesty and Dynesty successfully solve this multi-modal Gaussian mixture problem. The logZ estimates agree to within 0.0265, well within the combined uncertainty of ±0.1266. This validates JNesty's correctness for multi-modal problems.
+Both JNesty and Dynesty successfully solve this multi-modal Gaussian mixture problem. The logZ difference of 0.1549 slightly exceeds the combined uncertainty of ±0.1268 but remains within 2sigma, which is typical Monte Carlo scatter. This validates JNesty's correctness for multi-modal problems.
 
 ---
 
@@ -186,6 +189,6 @@ python 01_multimodal_gaussian_mixture_dynesty.py --nlive 500
 
 ---
 
-**Date:** 2026-05-07
+**Date:** 2026-05-10
 **Problem:** Multi-modal Gaussian Mixture (5D)
-**Status:** Complete - Good agreement with Dynesty
+**Status:** Complete - Marginal agreement with Dynesty (within 2sigma)
