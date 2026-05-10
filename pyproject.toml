@@ -10,15 +10,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
-    "jax>=0.4",
-    "jaxlib>=0.4",
+    "jax[cuda12]>=0.4",
     "numpy",
     "matplotlib",
+    "scipy",
     "tqdm",
 ]
 
 [project.optional-dependencies]
-dynesty = ["dynesty"]
+dynesty = ["dynesty", "corner", "astropy"]
 test = ["pytest"]
 
 [tool.pytest.ini_options]

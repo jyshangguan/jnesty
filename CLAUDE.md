@@ -35,12 +35,19 @@ src/jnesty/plotting.py            # Dynesty-style plotting helpers
 Architecture follows Dynesty's separation of concerns:
 
 ```text
-NestedSampler (jnesty.py)       # User-facing API
-  └─> run_nested_sampling (sampler.py)   # Core NS loop
-        ├─> Bound (bounding.py)          # Pluggable bounding methods
+NestedSampler (jnesty.py)            # User-facing API
+  └─> run_nested_sampling (sampler.py)  # Core NS loop (two-phase)
+        │   Phase 1: uniform rejection sampling (sampler.py)
+        │   Phase 2: random walk with adaptive bounds (sampler.py)
+        ├─> Bound (bounding.py)           # Pluggable bounding methods
         └─> InternalSampler (internal_samplers.py)  # Pluggable proposal strategies
   └─> format_results (results.py)        # Raw result -> Results object
 ```
+
+Sampling modes:
+
+- **Legacy mode** (`queue_size=0`): batch parallel walks, each with `rwalk_K // batch_size` steps
+- **Queue mode** (`queue_size>1`, default for `bound='multi'`): Dynesty-style GPU queue where each entry gets full `rwalk_K` steps; scale adapts at queue drain
 
 Demo and development files:
 
@@ -65,6 +72,7 @@ The current public-facing API is centered on:
 
 ```python
 from jnesty import NestedSampler, plotting
+from jnesty import save_results, load_results
 ```
 
 ## Collaboration style
@@ -231,10 +239,10 @@ After code changes, run the smallest meaningful check first.
 Examples:
 
 ```bash
-python -m py_compile src/jnesty/api.py
-python -m py_compile src/jnesty/while_loop_sampler.py
-python dev/demo/test_plotting.py
-pytest tests/test_api.py
+python -m py_compile src/jnesty/sampler.py
+python -m py_compile src/jnesty/internal_samplers.py
+python -m py_compile src/jnesty/jnesty.py
+pytest tests/integration/test_queue_and_defaults.py
 ```
 
 If sampler behavior changes, run at least one representative demo.
@@ -340,6 +348,41 @@ Important distinction:
 
 For nested sampling convergence, prefer `lax.while_loop` when early stopping is required.
 
+### Two-phase sampling
+
+The sampler uses a two-phase approach matching Dynesty:
+
+1. **Phase 1 (uniform rejection)**: Draws batches of uniform random points from the unit cube, picks the first valid replacement (logL > worst). Continues until efficiency drops below `min_eff` (default 10%) or `min_ncall` (default 2*nlive) calls are reached. JIT-compiled via `lax.while_loop`.
+
+2. **Phase 2 (random walk)**: Uses `RWalkSampler` with adaptive bounds. Runs in either:
+   - **Legacy mode**: batch parallel walks with `batch_size` walks of `rwalk_K // batch_size` steps each
+   - **Queue mode** (default for `bound='multi'`): Dynesty-style GPU queue where each entry gets full `rwalk_K` steps; scale adapts only at queue drain
+
+The bound is fitted from live points at the Phase 1 → Phase 2 transition.
+
+### Internal loop state tuple (Phase 2)
+
+The core loop packs mutable state into a flat tuple for `lax.while_loop`. Base state is 18 elements; queue mode extends to 23:
+
+| Idx | Variable | Description |
+|-----|----------|-------------|
+| 0 | live_x | (nlive, ndim) live points |
+| 1 | live_logL | (nlive,) live logL |
+| 2-5 | buffers | dead point x, logL, delta_logZ, scale trajectories |
+| 6 | logZ | running evidence |
+| 7 | delta_logZ | convergence metric |
+| 8 | iteration | loop counter |
+| 9 | key | PRNG key |
+| 10 | scale | current proposal scale |
+| 11 | hist_accept | accumulated acceptances (reset at bound update) |
+| 12 | hist_total | accumulated total proposals (reset at bound update) |
+| 13 | bound_axes | (ndim, ndim) axes from bound |
+| 14 | me_axes | (max_ell, ndim, ndim) multi-ellipsoid axes |
+| 15 | me_logvol_ells | (max_ell,) multi-ellipsoid volumes |
+| 16 | calls_at_update | total_calls at last bound update |
+| 17 | total_calls | total likelihood calls (non-resetting) |
+| 18-22 | queue arrays | (queue mode only) queue_x, queue_logL, queue_nacc, queue_ntot, queue_head |
+
 ### Convergence
 
 The main convergence condition is based on:
@@ -361,12 +404,15 @@ results = {
     'logz': float,
     'logzerr': float,
     'information': float,
-    'samples': ndarray,
-    'samples_u': ndarray,
-    'logl': ndarray,
-    'logwt': ndarray,
-    'logvol': ndarray,
-    'delta_logZ_trajectory': ndarray,
+    'samples': ndarray,            # (N, ndim) dead + live points (physical)
+    'samples_u': ndarray,          # (N, ndim) dead + live points (unit cube)
+    'logl': ndarray,               # (N,) log-likelihoods
+    'logwt': ndarray,              # (N,) log importance weights
+    'logvol': ndarray,             # (N,) log prior volumes
+    'logz_trajectory': ndarray,    # (N,) cumulative evidence
+    'logzerr_trajectory': ndarray, # (N,) evidence error trajectory
+    'delta_logZ_trajectory': ndarray,  # (niter,) convergence history
+    'scale_trajectory': ndarray,   # (niter,) proposal scale history
     'nlive': int,
     'niter': int,
     'eff': float,
@@ -408,7 +454,10 @@ Reasonable current defaults:
 
 ```python
 rwalk_K = max(25, ndim + 20)
-rwalk_step_scale = min(1.0, 1.0 / sqrt(ndim))
+rwalk_step_scale = 1.0  # Dynesty default
+batch_size = max(1, rwalk_K // max(1, rwalk_K * 10 // nlive))  # ~5 steps/walk
+queue_size = 8  # for bound='multi', Dynesty-style GPU parallelism
+bound_update_interval = rwalk_K * nlive  # in likelihood calls, matching Dynesty
 ```
 
 Change these only with tests or clear justification.

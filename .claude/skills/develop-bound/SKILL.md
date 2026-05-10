@@ -7,7 +7,7 @@ description: Guide for adding a new bounding method to JNesty.
 
 Bounding methods live in `src/jnesty/bounding.py`. Each implements the `Bound` interface and is registered in `BOUND_REGISTRY` for lookup by string name.
 
-The core NS loop in `src/jnesty/sampler.py` calls `bound_obj.fit()` to update the bound, `bound_obj.get_axes()` for proposal generation, and optionally uses bound-specific state for multi-ellipsoid walk schedules.
+The core NS loop in `src/jnesty/sampler.py` calls `bound_obj.fit()` to update the bound, `bound_obj.get_axes()` for proposal generation, and optionally uses bound-specific state for multi-ellipsoid proposals.
 
 ## Bound Interface
 
@@ -55,27 +55,36 @@ class Bound:
 - `get_walk_schedule(rwalk_K)`: Bresenham interleaving of ellipsoid indices
 - Use for: multi-modal, complex geometries
 - Requires periodic refitting via chunked loop mode
+- Auto-enables queue mode (`queue_size=8`) by default
 
 ## Integration with the Core NS Loop
 
-The bound is used in three places in `src/jnesty/sampler.py`:
+The bound is used in several places in `src/jnesty/sampler.py`:
 
-1. **Initial fit** (line ~144): `bound_obj.fit(live_physical)` after live points initialized
-2. **Axes extraction** (line ~175): `bound_axes = bound_obj.get_axes()` for rwalk proposals
-3. **Periodic refit** (chunked loop, line ~345): `fit_multi_ellipsoid(live_x_cur, ...)` for multi-ellipsoid
+1. **Initial fit** (transition Phase 1 → Phase 2): `bound_obj.fit(live_x)` after Phase 1 completes
+2. **Axes extraction**: `bound_axes = bound_obj.get_axes()` for rwalk proposals
+3. **Memory estimation**: `estimate_batch_size_from_memory()` uses `bound_axes` for probe
+4. **Periodic refit** (chunked loop): `fit_multi_ellipsoid(live_x_cur, ...)` between chunks
 
-For multi-ellipsoid, the chunked loop mode is activated when `use_chunked_loop = True` (bound is `'multi'` and `bound_update_interval > 0`). The loop runs chunks of `bound_update_interval` iterations, then refits the bound between chunks.
+For multi-ellipsoid, the chunked loop mode is activated when `use_chunked_loop = True` (bound is `'multi'` and `bound_update_interval > 0`). The loop runs chunks of `bound_update_interval` **likelihood calls**, then refits the bound between chunks.
 
 ### State packing for lax.while_loop
 
 The bound state is packed into the flat tuple that `lax.while_loop` carries:
 
 - Index 13: `bound_axes` — (ndim, ndim) axes matrix
-- Index 14: `walk_schedule` — (rwalk_K,) int array of ellipsoid indices
-- Index 15: `me_axes` — (max_ellipsoids, ndim, ndim) for multi-ellipsoid
-- Index 16: `me_logvol_ells` — (max_ellipsoids,) for multi-ellipsoid
+- Index 14: `me_axes` — (max_ellipsoids, ndim, ndim) multi-ellipsoid axes
+- Index 15: `me_logvol_ells` — (max_ellipsoids,) multi-ellipsoid log-volumes
+- Index 16: `calls_at_update` — total_calls at last bound update (for chunk timing)
+- Index 17: `total_calls` — total likelihood calls (non-resetting)
+
+Queue mode adds indices 18-22 for the candidate queue.
 
 A new bound that needs additional state in the loop must extend this tuple and update the packing/unpacking in `sampler.py`.
+
+### Scale history reset
+
+At bound updates (chunk boundaries), `hist_accept` (index 11) and `hist_total` (index 12) are reset to 0. This matches Dynesty's behavior: scale adapts quickly to the new bound shape.
 
 ## Steps to Add a New Bound
 
@@ -126,6 +135,7 @@ If your bound needs periodic refitting or custom state carried through `lax.whil
 - Add fields to the state tuple in `sampler.py`
 - Add a `use_chunked_loop` branch similar to multi-ellipsoid
 - Update the body function to use your bound's state
+- Update queue mode body function (`body_fn_q`) if queue support is needed
 
 If your bound is stateless or only needs initial fitting, no changes to `sampler.py` are needed — the factory handles it.
 
@@ -142,6 +152,7 @@ If your bound is stateless or only needs initial fitting, no changes to `sampler
 - [ ] All four methods implemented: `fit`, `sample`, `get_axes`, `contains`
 - [ ] Added to `BOUND_REGISTRY`
 - [ ] Core loop integration handled (state packing if needed)
+- [ ] Queue mode body function updated (if periodic updates needed)
 - [ ] `NestedSampler.__init__` accepts the new bound string
 - [ ] Tested with at least one demo problem
 - [ ] Acceptance rate and logZ compared with Dynesty

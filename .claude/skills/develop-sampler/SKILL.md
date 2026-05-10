@@ -9,6 +9,8 @@ Internal samplers live in `src/jnesty/internal_samplers.py`. Each implements the
 
 The core NS loop in `src/jnesty/sampler.py` calls `sampler_obj.sample()` to propose replacement live points and `sampler_obj.tune()` to adapt the proposal scale.
 
+There is also a standalone `vmap_queue_refill()` function for Dynesty-style queue mode that generates multiple candidates in parallel outside of any sampler object.
+
 ## InternalSampler Interface
 
 ```python
@@ -18,25 +20,31 @@ class InternalSampler:
     def __init__(self, ndim, **kwargs):
         self.ndim = ndim
 
-    def sample(self, key, x_start, logL_constraint, loglikelihood_fn,
-               axes, scale, n_steps, prior_bounds=None):
+    def sample(self, key, x_starts, logL_constraint, loglikelihood_fn,
+               axes, scale, n_steps, prior_bounds=None, walk_schedule=None):
         """
         Generate a replacement point.
 
         Parameters
         ----------
         key : jax.random.PRNGKey
-        x_start : (ndim,) starting point in unit cube space
+        x_starts : array
+            If batch_size=1: (ndim,) single starting point.
+            If batch_size>1: (batch_size, ndim) diverse starting points.
         logL_constraint : float, minimum log-likelihood
-        loglikelihood_fn : callable, log-likelihood (physical space)
-        axes : (ndim, ndim) or (max_ellipsoids, ndim, ndim) axes matrix
+        loglikelihood_fn : callable, log-likelihood
+        axes : array
+            If batch_size=1: (ncdim, ncdim) single axes matrix.
+            If batch_size>1: (batch_size, ncdim, ncdim) per-walk axes.
         scale : float, current proposal scale
         n_steps : int, number of walk/slice steps
         prior_bounds : optional (2, ndim) array for rejection
+        walk_schedule : optional array, not used in current code (legacy)
 
         Returns
         -------
-        (x_new, logL_new, n_accepted) tuple
+        (x_new, logL_new, n_accepted, n_total) tuple
+            n_total includes boundary rejections (matches Dynesty semantics)
         """
         raise NotImplementedError
 
@@ -44,6 +52,8 @@ class InternalSampler:
         """Adapt scale based on acceptance rate. Returns new scale."""
         raise NotImplementedError
 ```
+
+**Important**: `sample()` returns a **4-tuple** `(x_new, logL_new, n_accepted, n_total)`, not a 3-tuple. The `n_total` counts all proposals including boundary rejections.
 
 ## JAX Constraints
 
@@ -54,17 +64,49 @@ All code inside `sample()` must be JAX-compatible because it runs inside `lax.wh
 - **No side effects**: sample must be a pure function of its inputs
 - **Use `lax.scan`** for loops, not Python `for`
 - **Key splitting**: always split keys before use: `key, subkey = random.split(key)`
+- **Branchless likelihood evaluation**: use `jnp.where(in_bounds, loglikelihood_fn(x), -inf)` for XLA fusion — `lax.cond` with data-dependent predicates inside `lax.scan` kills GPU kernel fusion
 
 ## Reference: RWalkSampler
 
-The existing `RWalkSampler` (lines 57-151 of `internal_samplers.py`) demonstrates the pattern:
+The existing `RWalkSampler` demonstrates the pattern:
 
-1. `sample()` uses `lax.scan` over `n_steps` walk steps
-2. Each step proposes via `randsphere()` transformed by axes matrix
+### Key functions
+
+**`_single_walk(key, x_start, logL_constraint, loglikelihood_fn, axes, scale, n_steps, ndim, n_cluster, prior_bounds, walk_schedule)`**
+Core walk function using `lax.scan` over `n_steps`. Each step:
+1. Proposes via `randsphere()` transformed by axes matrix (clustered dims)
+2. Non-clustered dims resampled uniformly
 3. Accepts if in unit cube AND satisfies logL constraint (no Metropolis)
-4. Returns `(x_new, logL_new, n_accepted)` — the final position and total acceptances
+4. Returns `(x_final, n_accepted, n_total)`
 
-Key detail for multi-ellipsoid: `sample()` accepts an optional `walk_schedule` parameter — a pre-computed array of ellipsoid indices used to select which axes to use for each walk step.
+**`_propose_one(key, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx)`**
+Single proposal generation. First `n_cluster` dimensions perturbed via axes transform; remaining dims uniform from [0,1].
+
+**`apply_reflect(u)`**
+Iterative reflection into [0,1]. Matches Dynesty's `apply_reflect`.
+
+**`vmap_queue_refill(refill_key, live_x, live_logL, loglstar, loglikelihood_fn, me_axes, me_logvol_ells, bound_axes, scale, rwalk_K, ndim, ncdim, queue_size, use_multi_ellipsoid, prior_bounds=None)`**
+Generates `queue_size` candidates in parallel. Each gets full `rwalk_K` steps from a random starting point (live point above loglstar) with a random volume-weighted ellipsoid. Returns `(queue_x, queue_logL, queue_nacc, queue_ntot)`.
+
+### Batch mode (legacy)
+
+When `batch_size > 1`, `RWalkSampler.sample()` runs `batch_size` independent walks in parallel via `jax.vmap`:
+- Each walk starts from a different live point
+- Each walk uses a different (volume-weighted random) ellipsoid
+- Steps per walk: `rwalk_K // batch_size`
+- First valid candidate is selected as replacement
+- All walks' acceptance stats summed for scale adaptation
+
+### Scale adaptation
+
+`RWalkSampler.tune()` uses Robbins-Munro adaptation matching Dynesty:
+```python
+proposed_scale = scale * jnp.exp(
+    (acceptance_rate - target_acceptance)
+    / ncdim / target_acceptance
+)
+```
+Uses `ncdim` (clustered dimensions) not full `ndim`, matching Dynesty.
 
 ## Steps to Add a New Sampler
 
@@ -76,12 +118,11 @@ Add your class to `src/jnesty/internal_samplers.py`:
 class SliceSampler(InternalSampler):
     def __init__(self, ndim, **kwargs):
         super().__init__(ndim, **kwargs)
-        # Your initialization
 
-    def sample(self, key, x_start, logL_constraint, loglikelihood_fn,
-               axes, scale, n_steps, prior_bounds=None, **kwargs):
+    def sample(self, key, x_starts, logL_constraint, loglikelihood_fn,
+               axes, scale, n_steps, prior_bounds=None, walk_schedule=None):
         # Your sampling logic
-        # Must return (x_new, logL_new, n_accepted)
+        # Must return (x_new, logL_new, n_accepted, n_total)
         pass
 
     def tune(self, scale, acceptance_rate, ndim, iteration):
@@ -105,20 +146,24 @@ SAMPLER_REGISTRY = {
 In `src/jnesty/sampler.py`, the sampler is currently hardcoded:
 
 ```python
-sampler_obj = get_sampler('rwalk', ndim, ...)  # line ~141
+sampler_obj = get_sampler('rwalk', ndim, ...)  # line ~400
 ```
 
-To make it configurable, this string should come from the config. The `WhileLoopNSConfig` NamedTuple may need a new `sampler` field (currently `bound` is already configurable this way).
+To make it configurable, add a `sampler` field to `WhileLoopNSConfig` and pass it through.
 
 ### 4. Wire into the user API
 
-In `src/jnesty/jnesty.py`, the `NestedSampler.__init__` needs a `sampler` parameter (analogous to the existing `bound` parameter):
+In `src/jnesty/jnesty.py`, add a `sampler` parameter to `NestedSampler.__init__`:
 
 ```python
 def __init__(self, ..., sampler='rwalk', ...):
 ```
 
-### 5. Test
+### 5. Consider queue mode
+
+If the sampler should work with queue mode, you may need a queue-refill function similar to `vmap_queue_refill()`. This function generates `queue_size` candidates in parallel, each using the full `rwalk_K` steps independently.
+
+### 6. Test
 
 1. `python -m py_compile src/jnesty/internal_samplers.py`
 2. Run a demo with the new sampler
@@ -127,8 +172,9 @@ def __init__(self, ..., sampler='rwalk', ...):
 ## Checklist
 
 - [ ] Class inherits `InternalSampler`
-- [ ] `sample()` returns `(x_new, logL_new, n_accepted)`
+- [ ] `sample()` returns `(x_new, logL_new, n_accepted, n_total)` — 4-tuple
 - [ ] `sample()` is JAX-compatible (no Python control flow in hot path)
+- [ ] `sample()` handles both single and batch modes (x_starts shape varies)
 - [ ] `tune()` returns a valid scale (or passes through unchanged)
 - [ ] Added to `SAMPLER_REGISTRY`
 - [ ] Config and API wired through (`WhileLoopNSConfig`, `NestedSampler`)
