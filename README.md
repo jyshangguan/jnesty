@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="doc/logo.jpg" alt="JNesty logo" width="400">
+</p>
+
 # JNesty
 
 GPU-accelerated nested sampling with JAX, designed for expensive likelihood
@@ -142,6 +146,11 @@ Each demo has a JNesty variant (`*_jnesty.py`) and a dynesty variant
 (`*_dynesty.py`) for direct comparison.
 
 ## Acknowledgments
+
+JNesty's sampling algorithms and bounding methods closely follow the
+[dynesty](https://dynesty.readthedocs.io/) nested sampling package. We gratefully
+acknowledge the dynesty authors for their well-documented, battle-tested
+implementations that served as the primary reference for this work.
 
 This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
 
