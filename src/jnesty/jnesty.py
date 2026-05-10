@@ -45,13 +45,20 @@ class NestedSampler:
     bound : str, optional
         Bounding method: 'none', 'single', 'multi'. Default: 'none'
     bound_update_interval : int, float, or None, optional
-        Controls periodic bound refitting. Default: None (automatic).
+        Controls periodic bound refitting, measured in likelihood calls.
+        None (default): automatic — rwalk_K * nlive calls for bound='multi'
+        (matching Dynesty's walks * nlive), off otherwise.
+        Set to 0 to disable, float in (0,1) for fraction of rwalk_K * nlive.
     max_ellipsoids : int, optional
         Maximum ellipsoids for multi-ellipsoid. Default: 20
     batch_size : int or None, optional
         Number of parallel walks for GPU-parallel likelihood evaluation.
-        None (default): auto-tuned as rwalk_K // max(2, rwalk_K * 10 // nlive).
-        Set to 1 to disable parallelism.
+        Only used when queue_size=0 (legacy mode). None (default): auto-tuned
+        to ~5 steps/walk. Set to 1 to disable parallelism.
+    queue_size : int or None, optional
+        Dynesty-style queue mode. None (default): automatic — 8 for
+        bound='multi' (matching Dynesty's multiprocessing), 0 otherwise.
+        Each queue entry gets full rwalk_K steps; scale adapts at queue drain.
     memory_frac : float, optional
         Fraction of GPU memory to use for batch walks. Default: 0.9.
         Caps batch_size if it would exceed this fraction of GPU memory.
@@ -74,6 +81,7 @@ class NestedSampler:
         bound_update_interval: Optional[Union[int, float]] = None,
         max_ellipsoids: int = 20,
         batch_size: Optional[int] = None,
+        queue_size: Optional[int] = None,
         memory_frac: float = 0.9,
         unit_cube_batch_size: int = 200,
         min_eff: float = 10.0,
@@ -94,23 +102,6 @@ class NestedSampler:
         self.min_eff = min_eff
         self.min_ncall = min_ncall
 
-        # Resolve bound_update_interval
-        if bound_update_interval is None:
-            if bound == 'multi':
-                bound_update_interval = nlive
-            else:
-                bound_update_interval = 0
-        elif isinstance(bound_update_interval, float) and bound_update_interval > 0:
-            bound_update_interval = int(bound_update_interval * nlive)
-        self.bound_update_interval = bound_update_interval
-
-        if verbose and bound == 'multi':
-            if bound_update_interval == 0:
-                print("Bound update: once at start (no periodic updates)")
-            else:
-                print(f"Bound update interval: {bound_update_interval} iterations "
-                      f"({bound_update_interval / nlive:.1f} x nlive)")
-
         # Auto-tune parameters
         if rwalk_K is None:
             rwalk_K = max(25, ndim + 20)
@@ -125,14 +116,50 @@ class NestedSampler:
         self.rwalk_K = rwalk_K
         self.rwalk_step_scale = rwalk_step_scale
 
-        # Auto-tune batch_size: target ~2 steps per walk for good GPU utilization.
-        # batch_size = rwalk_K // 2 gives 2 steps/walk with ~28 parallel walks.
-        if batch_size is None:
-            batch_size = max(1, rwalk_K // 2)
+        # Resolve bound_update_interval (in likelihood calls, matching Dynesty)
+        # Dynesty default: walks * nlive likelihood calls ≈ nlive iterations.
+        # JNesty: None means auto (rwalk_K * nlive calls for multi, 0 otherwise).
+        if bound_update_interval is None:
+            if bound == 'multi':
+                bound_update_interval = rwalk_K * nlive  # Dynesty default (calls)
+            else:
+                bound_update_interval = 0
+        elif isinstance(bound_update_interval, float) and bound_update_interval > 0:
+            bound_update_interval = int(bound_update_interval * nlive * rwalk_K)
+        self.bound_update_interval = bound_update_interval
+
+        if verbose and bound == 'multi':
+            if bound_update_interval == 0:
+                print("Bound update: once at start (no periodic updates)")
+            else:
+                print(f"Bound update interval: {bound_update_interval} calls "
+                      f"(~{bound_update_interval / rwalk_K:.0f} iters, "
+                      f"{bound_update_interval / rwalk_K / nlive:.1f} x nlive)")
+
+        # Auto-tune batch_size / queue_size
+        # Queue mode: Dynesty-style batch queue where each walk gets full rwalk_K steps.
+        # Legacy mode: split rwalk_K across batch_size walks (original JNesty behavior).
+        # Dynesty default: always uses multiprocessing (queue) with multi-ellipsoid.
+        if queue_size is None:
+            if bound == 'multi':
+                queue_size = 8  # Dynesty-style GPU parallelism
+            else:
+                queue_size = 0  # legacy mode for non-multi bounds
+
+        if queue_size > 1:
+            # Queue mode: scale adapts at queue drain (no per-iteration noise)
+            batch_size = 1  # not used in queue mode, set for config compat
+            if verbose:
+                print(f"Queue mode: queue_size={queue_size}, "
+                      f"each walk gets full {rwalk_K} steps")
+        elif batch_size is None:
+            steps_per_walk = 5
+            batch_size = max(1, rwalk_K // steps_per_walk)
             if verbose:
                 print(f"Auto-tuned batch_size = {batch_size} "
                       f"(rwalk_K={rwalk_K}, ~{max(1, rwalk_K // batch_size)} steps/walk)")
         self.batch_size = batch_size
+        self.queue_size = queue_size
 
         if device == 'cpu':
             jax.config.update('jax_platform_name', 'cpu')
@@ -190,6 +217,7 @@ class NestedSampler:
             bound_update_interval=self.bound_update_interval,
             max_ellipsoids=self.max_ellipsoids,
             batch_size=self.batch_size,
+            queue_size=self.queue_size,
             memory_frac=self.memory_frac,
             unit_cube_batch_size=self.unit_cube_batch_size,
             min_eff=self.min_eff,

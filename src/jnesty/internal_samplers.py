@@ -157,6 +157,65 @@ def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
     return final_state[0], final_state[2], final_state[3]
 
 
+def vmap_queue_refill(refill_key, live_x, live_logL, loglstar,
+                      loglikelihood_fn, me_axes, me_logvol_ells,
+                      bound_axes, scale, rwalk_K, ndim, ncdim,
+                      queue_size, use_multi_ellipsoid, prior_bounds=None):
+    """Generate queue_size candidate points in parallel via vmap.
+
+    Each candidate is produced by a FULL rwalk_K-step random walk from a
+    random starting point (live point above loglstar) using a random ellipsoid
+    (or bound_axes if not multi-ellipsoid).  Matches Dynesty's pool.map batch:
+    every worker does a full walk independently.
+
+    Returns
+    -------
+    (queue_x, queue_logL, queue_nacc, queue_ntot) each of leading dim queue_size.
+    """
+    keys = random.split(refill_key, queue_size)
+    n_ells = me_axes.shape[0]
+    nlive = live_x.shape[0]
+
+    # Pre-compute ellipsoid probabilities (shared across all candidates)
+    if use_multi_ellipsoid:
+        ell_log_probs = me_logvol_ells - jax.scipy.special.logsumexp(me_logvol_ells)
+        ell_probs = jnp.exp(ell_log_probs)
+        ell_probs = jnp.where(jnp.isnan(ell_probs) | (ell_probs < 0), 0.0, ell_probs)
+        ell_probs = ell_probs / jnp.maximum(ell_probs.sum(), 1e-30)
+    else:
+        ell_probs = None
+
+    # Pre-compute above-mask probabilities (shared, but loglstar is fixed for the batch)
+    above_mask = live_logL > loglstar
+    above_probs = above_mask.astype(jnp.float32)
+    above_probs = above_probs / jnp.maximum(above_probs.sum(), 1)
+
+    def _generate_one(k):
+        k_start, k_ell, k_walk = random.split(k, 3)
+
+        # Select random starting point above loglstar
+        start_idx = random.choice(k_start, nlive, p=above_probs)
+        x_start = live_x[start_idx]
+
+        # Select ellipsoid axes
+        if use_multi_ellipsoid:
+            ell_idx = random.choice(k_ell, n_ells, p=ell_probs)
+            axes = me_axes[ell_idx]
+        else:
+            axes = bound_axes
+
+        # Run full walk
+        x_new, n_acc, n_tot = _single_walk(
+            k_walk, x_start, loglstar, loglikelihood_fn,
+            axes, scale, rwalk_K, ndim, ncdim,
+            prior_bounds, None
+        )
+        logL_new = loglikelihood_fn(x_new)
+        return x_new, logL_new, n_acc, n_tot
+
+    return jax.vmap(_generate_one)(keys)
+
+
 class RWalkSampler(InternalSampler):
     """
     Random walk sampler with n-ball proposals and adaptive scale.
@@ -249,10 +308,9 @@ class RWalkSampler(InternalSampler):
             any_valid = jnp.any(valid)
 
             x_new = jnp.where(any_valid, x_candidates[first_valid], x_starts[0])
-            n_accepted = jnp.where(
-                any_valid, n_accepted_arr[first_valid], 0
-            )
-            n_total = n_total_arr[first_valid]
+            # Sum ALL walks' acceptance stats for scale adaptation (matches Dynesty)
+            n_accepted = jnp.sum(n_accepted_arr).astype(jnp.int32)
+            n_total = jnp.sum(n_total_arr).astype(jnp.int32)
 
         logL_new = loglikelihood_fn(x_new)
         return x_new, logL_new, n_accepted, n_total

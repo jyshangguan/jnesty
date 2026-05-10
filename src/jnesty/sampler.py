@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 from jax import random, lax
 
-from .internal_samplers import RWalkSampler, _single_walk
+from .internal_samplers import RWalkSampler, _single_walk, vmap_queue_refill
 from .utils import logsubexp
 
 # Import for progress tracking
@@ -43,6 +43,7 @@ class WhileLoopNSConfig(NamedTuple):
     bound_update_interval: int = 0
     max_ellipsoids: int = 20
     batch_size: int = 1
+    queue_size: int = 0  # 0 = legacy mode (batch), >1 = queue mode (Dynesty-style)
     memory_frac: float = 0.9
     ncdim: int = None  # number of clustered dimensions (defaults to ndim)
     unit_cube_batch_size: int = 200  # batch size for uniform rejection phase
@@ -119,14 +120,10 @@ def estimate_batch_size_from_memory(
     capped = min(requested_batch_size, max_batch)
 
     if verbose and capped < requested_batch_size:
-        print(f"Memory cap: batch_size {requested_batch_size} -> {capped} "
+        print(f"  Memory cap: batch_size {requested_batch_size} -> {capped} "
               f"(per-walk: {per_walk / 1024:.0f} KB, "
               f"budget: {available / (1024**2):.0f} MB, "
               f"GPU: {stats['bytes_limit'] / (1024**3):.1f} GB)")
-    elif verbose:
-        print(f"Memory check OK: batch_size={requested_batch_size} "
-              f"(per-walk: {per_walk / 1024:.0f} KB, "
-              f"budget: {available / (1024**2):.0f} MB)")
 
     return capped
 
@@ -295,22 +292,11 @@ def run_nested_sampling(
     else:
         loglikelihood_for_jit = loglikelihood_fn
 
-    if config.verbose:
-        print("=" * 70)
-        print("JNesty Nested Sampling")
-        print("=" * 70)
-        print(f"Live points: {nlive}")
-        print(f"Max iterations: {max_iterations}")
-        print(f"Convergence threshold: delta_logZ < {delta_logZ_threshold}")
-        print(f"Bound: {config.bound}")
-        print(f"Walk steps: {rwalk_K}")
-        print(f"Phase 1: uniform rejection (batch={config.unit_cube_batch_size}, "
-              f"min_eff={config.min_eff}%, min_ncall={min_ncall})")
-        if config.bound == 'multi':
-            print(f"Max ellipsoids: {config.max_ellipsoids}")
-            print(f"Bound update interval: {config.bound_update_interval}")
-        print("=" * 70)
-        print()
+    # Create progress bar covering entire sampling run
+    if config.print_progress and TQDM_AVAILABLE:
+        pbar = tqdm(total=max_iterations, desc="JNesty")
+    else:
+        pbar = None
 
     start_time = time.time()
 
@@ -333,9 +319,6 @@ def run_nested_sampling(
     )
 
     # === PHASE 1: Uniform rejection sampling ===
-    if config.verbose:
-        print("Phase 1: Uniform rejection sampling...")
-
     phase1_result = _run_uniform_phase(
         loglikelihood_for_jit, live_x, live_logL,
         worst_x_buffer, worst_logL_buffer,
@@ -369,20 +352,24 @@ def run_nested_sampling(
 
     converged_phase1 = float(delta_logZ) < delta_logZ_threshold
 
-    if config.verbose:
-        print(f"  Phase 1 done: {phase1_iters} iterations, "
-              f"eff={phase1_eff:.1f}%, logZ={float(logZ):.2f}, "
-              f"dlogZ={float(delta_logZ):.4f}")
+    # Update progress bar after Phase 1
+    if pbar is not None:
+        pbar.n = phase1_iters
+        loglstar_p1 = float(jnp.min(live_logL))
+        pbar.set_postfix_str(
+            f'logZ: {float(logZ):.2f} | dlogZ: {float(delta_logZ):.3f} | '
+            f'logl*: {loglstar_p1:.1f} | eff(%): {phase1_eff:.1f}')
+        pbar.refresh()
 
     if converged_phase1:
         # Already converged during Phase 1
+        if pbar is not None:
+            pbar.close()
         iteration_final = phase1_iters
         final_hist_accept = 0
         final_hist_total = phase1_total_calls
     else:
         # === TRANSITION: Fit initial bound ===
-        if config.verbose:
-            print("Fitting initial bound for Phase 2...")
 
         from .bounding import get_bound
         from .internal_samplers import get_sampler
@@ -392,11 +379,8 @@ def run_nested_sampling(
                               scale=config.rwalk_step_scale)
 
         if config.bound != 'none':
-            if prior_transform_fn is not None:
-                live_physical = jnp.stack([prior_transform_fn(x) for x in live_x])
-                bound_obj.fit(live_physical)
-            else:
-                bound_obj.fit(live_x)
+            # Fit in unit-cube space (matching Dynesty: self.live_u[:, :self.ncdim])
+            bound_obj.fit(live_x)
 
         # Memory-cap batch_size
         bound_axes_for_probe = bound_obj.get_axes()
@@ -424,9 +408,6 @@ def run_nested_sampling(
         config = config._replace(batch_size=effective_batch_size)
 
         # === PHASE 2: Rwalk with adaptive bounding ===
-        if config.verbose:
-            print(f"Phase 2: Rwalk sampling (starting iter {phase1_iters})...")
-
         use_multi_ellipsoid = config.bound == 'multi'
         bound_update_interval = config.bound_update_interval
         use_chunked_loop = use_multi_ellipsoid and bound_update_interval > 0
@@ -447,8 +428,19 @@ def run_nested_sampling(
 
         has_prior_bounds = config.prior_bounds is not None
 
+        # Queue mode setup: pre-fill queue with initial candidates
+        if config.queue_size > 1:
+            _ncdim_init = config.ncdim if config.ncdim else ndim
+            key, _refill_key = random.split(key)
+            _loglstar_init = jnp.min(live_logL)
+            _init_qx, _init_qlogL, _init_qnacc, _init_qntot = vmap_queue_refill(
+                _refill_key, live_x, live_logL, _loglstar_init, loglikelihood_for_jit,
+                me_axes, me_logvol_ells, bound_axes, current_scale,
+                rwalk_K, ndim, _ncdim_init, config.queue_size, use_multi_ellipsoid,
+                config.prior_bounds if has_prior_bounds else None)
+
         # State for Phase 2 (continues from Phase 1)
-        init_state = (
+        _base_state = (
             live_x,                  # 0
             live_logL,               # 1
             worst_x_buffer,          # 2
@@ -465,8 +457,16 @@ def run_nested_sampling(
             bound_axes,              # 13 bound_axes
             me_axes,                 # 14 me_axes
             me_logvol_ells,          # 15 me_logvol_ells
-            jnp.array(phase1_iters, dtype=jnp.int32), # 16 chunk_start
+            jnp.array(phase1_total_calls, dtype=jnp.int32), # 16 total_calls at last bound update
+            jnp.array(phase1_total_calls, dtype=jnp.int32),  # 17 total_calls (non-resetting)
         )
+        if config.queue_size > 1:
+            init_state = _base_state + (
+                _init_qx, _init_qlogL, _init_qnacc, _init_qntot,
+                jnp.array(0, dtype=jnp.int32),  # 22: queue_head
+            )
+        else:
+            init_state = _base_state
 
         def cond_fn(state):
             dlz = state[7]
@@ -587,6 +587,8 @@ def run_nested_sampling(
             dlz_buf_new = state[4].at[iteration].set(delta_logZ_new)
             scale_buf_new = state[5].at[iteration].set(new_scale)
 
+            total_calls = state[17] + iter_total
+
             return (
                 live_x_new, live_logL_new,
                 worst_x_buf_new, worst_logL_buf_new,
@@ -598,7 +600,136 @@ def run_nested_sampling(
                 state[13],
                 me_axes_state, state[15],
                 state[16],
+                total_calls,
             )
+
+        # === Queue mode body_fn (Dynesty-style) ===
+        # Each call tests ONE pre-computed candidate from the queue.
+        # Iteration only advances when a valid candidate is found.
+        # Scale/bound update only when queue drains.
+        if config.queue_size > 1:
+            _queue_size = config.queue_size
+            _ncdim_q = config.ncdim if config.ncdim else ndim
+
+            # cond_fn with safety limit on total calls
+            _max_calls_limit = max_iterations * rwalk_K * 20
+
+            def cond_fn_q(state):
+                dlz = state[7]
+                it = state[8]
+                calls = state[17]
+                return (dlz >= delta_logZ_threshold) & (it < max_iterations) & (calls < _max_calls_limit)
+
+            def body_fn_q(state):
+                live_x = state[0]
+                live_logL = state[1]
+                iteration = state[8]
+                key = state[9]
+                scale = state[10]
+                me_axes_state = state[14]
+                me_logvol_ells = state[15]
+                queue_x_arr = state[18]
+                queue_logL_arr = state[19]
+                queue_nacc_arr = state[20]
+                queue_ntot_arr = state[21]
+                queue_head = state[22]
+
+                # 1. Read current candidate from queue
+                cand_x = queue_x_arr[queue_head]
+                cand_logL = queue_logL_arr[queue_head]
+                cand_nacc = queue_nacc_arr[queue_head]
+                cand_ntot = queue_ntot_arr[queue_head]
+
+                # 2. Find worst live point (= loglstar)
+                worst_idx = jnp.argmin(live_logL)
+                worst_logL = live_logL[worst_idx]
+
+                # 3. Test candidate against loglstar
+                valid = cand_logL > worst_logL
+
+                # 4. Accumulate stats from this candidate (always)
+                hist_accept = state[11] + cand_nacc
+                hist_total = state[12] + cand_ntot
+
+                # 5. Compute post-acceptance state (branchless)
+                x_accept = jnp.where(valid, cand_x, live_x[worst_idx])
+                logL_accept = jnp.where(valid, cand_logL, worst_logL)
+                live_x_new = live_x.at[worst_idx].set(x_accept)
+                live_logL_new = live_logL.at[worst_idx].set(logL_accept)
+
+                # 6. Queue management
+                new_head = queue_head + 1
+                queue_drained = new_head >= _queue_size
+
+                # 7. Queue drain: update scale + refill (lax.cond avoids wasted GPU compute)
+                def _do_drain(drain_args):
+                    sc, ky, lx, ll, it_d, ha, ht = drain_args
+                    facc = ha.astype(jnp.float32) / jnp.maximum(ht, 1).astype(jnp.float32)
+                    new_sc = sampler_obj.tune(sc, facc, ndim, it_d).astype(sc.dtype)
+                    ky, rkey = random.split(ky)
+                    loglstar_r = jnp.min(ll)
+                    qx, ql, qna, qnt = vmap_queue_refill(
+                        rkey, lx, ll, loglstar_r, loglikelihood_for_jit,
+                        me_axes_state, me_logvol_ells, state[13], new_sc,
+                        rwalk_K, ndim, _ncdim_q, _queue_size, use_multi_ellipsoid,
+                        config.prior_bounds if has_prior_bounds else None)
+                    return new_sc, qx, ql, qna, qnt, ky
+
+                def _skip_drain(drain_args):
+                    sc, ky, lx, ll, it_d, ha, ht = drain_args
+                    return sc, queue_x_arr, queue_logL_arr, queue_nacc_arr, queue_ntot_arr, ky
+
+                drain_args = (scale, key, live_x_new, live_logL_new, iteration, hist_accept, hist_total)
+                d_sc, d_qx, d_ql, d_qna, d_qnt, d_key = lax.cond(
+                    queue_drained, _do_drain, _skip_drain, drain_args)
+
+                new_hist_accept = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), hist_accept)
+                new_hist_total = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), hist_total)
+                final_head = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), new_head)
+
+                # 8. Evidence update (only when valid)
+                logX_old = -iteration / nlive
+                logX_new_val = -(iteration + 1) / nlive
+                log_dX = logsubexp(logX_old, logX_new_val)
+                log_dZ = worst_logL + log_dX
+                logZ_new = jnp.where(valid, jnp.logaddexp(state[6], log_dZ), state[6])
+
+                max_live_logL = jnp.max(live_logL_new)
+                dlz_new_val = jax.scipy.special.logsumexp(
+                    jnp.array([jnp.zeros((), dtype=buf_dtype), max_live_logL + logX_new_val - logZ_new]))
+                delta_logZ_new = jnp.where(valid, dlz_new_val, state[7])
+
+                # 9. Buffer writes (only when valid)
+                wx_buf_new = jnp.where(valid,
+                    state[2].at[iteration].set(live_x[worst_idx]), state[2])
+                wl_buf_new = jnp.where(valid,
+                    state[3].at[iteration].set(worst_logL), state[3])
+                dlz_buf_new = jnp.where(valid,
+                    state[4].at[iteration].set(dlz_new_val), state[4])
+                sc_buf_new = jnp.where(valid,
+                    state[5].at[iteration].set(d_sc), state[5])
+
+                # 10. Iteration advance (only when valid)
+                new_iteration = jnp.where(valid, iteration + 1, iteration)
+
+                total_calls = state[17] + cand_ntot
+
+                return (
+                    live_x_new, live_logL_new,
+                    wx_buf_new, wl_buf_new,
+                    dlz_buf_new, sc_buf_new,
+                    logZ_new, delta_logZ_new,
+                    new_iteration, d_key, d_sc,
+                    new_hist_accept, new_hist_total,
+                    state[13], me_axes_state, me_logvol_ells,
+                    state[16], total_calls,
+                    d_qx, d_ql, d_qna, d_qnt,
+                    final_head,
+                )
+
+            # Override with queue versions
+            cond_fn = cond_fn_q
+            body_fn = body_fn_q
 
         # Execute Phase 2 loop
         if use_chunked_loop:
@@ -607,22 +738,19 @@ def run_nested_sampling(
             current_state = init_state
             total_done = phase1_iters
 
-            if config.print_progress and TQDM_AVAILABLE:
-                pbar = tqdm(total=max_iterations, desc="Nested Sampling",
-                            initial=phase1_iters)
-
-            def _progress_cb(it, dlz, lz, loglstar):
-                if int(it) % 100 == 0:
-                    pbar.n = int(it)
-                    loglstar_val = float(loglstar)
-                    if loglstar_val <= -1e6:
-                        loglstar_str = '-inf'
-                    else:
-                        loglstar_str = f'{loglstar_val:.1f}'
-                    pbar.set_postfix_str(
-                        f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} | '
-                        f'logl*: {loglstar_str}')
-                    pbar.refresh()
+            if pbar is not None:
+                def _progress_cb(it, dlz, lz, loglstar, eff):
+                    if int(it) % 100 == 0:
+                        pbar.n = int(it)
+                        loglstar_val = float(loglstar)
+                        if loglstar_val <= -1e6:
+                            loglstar_str = '-inf'
+                        else:
+                            loglstar_str = f'{loglstar_val:.1f}'
+                        pbar.set_postfix_str(
+                            f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} | '
+                            f'logl*: {loglstar_str} | eff(%): {float(eff):.1f}')
+                        pbar.refresh()
 
             _body_fn = body_fn
 
@@ -631,8 +759,10 @@ def run_nested_sampling(
                     new_state = _body_fn(state)
                     try:
                         loglstar = jnp.min(new_state[1])
+                        total_calls_val = new_state[17]
+                        eff = (new_state[8] + nlive) * 100.0 / jnp.maximum(total_calls_val, 1)
                         io_callback(_progress_cb, None, new_state[8], new_state[7],
-                                     new_state[6], loglstar)
+                                     new_state[6], loglstar, eff)
                     except Exception:
                         pass
                     return new_state
@@ -643,13 +773,22 @@ def run_nested_sampling(
             def chunk_cond(state):
                 converged = state[7] < delta_logZ_threshold
                 too_many = state[8] >= max_iterations
-                chunk_done = (state[8] - state[16]) >= bound_update_interval
+                chunk_done = (state[17] - state[16]) >= bound_update_interval
                 return (~converged) & (~too_many) & (~chunk_done)
 
             compiled_chunk = jax.jit(lambda s: lax.while_loop(chunk_cond, body_fn_for_chunk, s))
 
             while total_done < max_iterations:
-                state_with_chunk = (*current_state[:-1], jnp.array(total_done, dtype=jnp.int32))
+                # Build chunk start state: set pos 16 to current total_calls
+                calls_at_start = int(current_state[17])
+                if config.queue_size > 1:
+                    state_with_chunk = (
+                        *current_state[:16], jnp.array(calls_at_start, dtype=jnp.int32),
+                        current_state[17],
+                        *current_state[18:],  # queue arrays + head
+                    )
+                else:
+                    state_with_chunk = (*current_state[:16], jnp.array(calls_at_start, dtype=jnp.int32), current_state[17])
                 current_state = compiled_chunk(state_with_chunk)
 
                 iteration = int(current_state[8])
@@ -659,39 +798,60 @@ def run_nested_sampling(
                 if delta_logZ_val < delta_logZ_threshold or total_done >= max_iterations:
                     break
 
-                # Refit multi-ellipsoid
-                live_x_cur = current_state[0]
-                me_state = fit_multi_ellipsoid(live_x_cur, max_ellipsoids=max_ellipsoids, enlarge=1.25)
+                # Refit multi-ellipsoid in unit-cube space (matching Dynesty)
+                live_u_cur = current_state[0]
+                me_state = fit_multi_ellipsoid(live_u_cur, max_ellipsoids=max_ellipsoids, enlarge=1.25)
 
-                if config.verbose and total_done % (bound_update_interval * 5) < bound_update_interval:
-                    print(f"  Iter {total_done}: refit multi-ellipsoid -> {me_state.n_active} ellipsoid(s), "
+                if config.verbose:
+                    calls_now = int(current_state[17])
+                    print(f"  Iter {total_done} ({calls_now} calls): refit multi-ellipsoid -> "
+                          f"{me_state.n_active} ellipsoid(s), "
                           f"logZ={float(current_state[6]):.2f}, dlogZ={delta_logZ_val:.3f}")
 
-                # Repack with updated multi-ellipsoid state + RESET scale history
-                current_state = (
-                    current_state[0], current_state[1],
-                    current_state[2], current_state[3],
-                    current_state[4], current_state[5],
-                    current_state[6], current_state[7],
-                    current_state[8], current_state[9],
-                    current_state[10],
-                    jnp.array(0, dtype=jnp.int32),  # 11: hist_accept RESET
-                    jnp.array(0, dtype=jnp.int32),  # 12: hist_total RESET
-                    current_state[13],
-                    me_state.axes, me_state.logvol_ells,
-                    current_state[16],
-                )
+                # Repack with updated multi-ellipsoid state
+                # Reset scale history so scale adapts to new axes quickly
+                # (Dynesty resets history after every walk in single-worker mode)
+                if config.queue_size > 1:
+                    # Queue mode: force queue drain by setting head = queue_size
+                    current_state = (
+                        current_state[0], current_state[1],
+                        current_state[2], current_state[3],
+                        current_state[4], current_state[5],
+                        current_state[6], current_state[7],
+                        current_state[8], current_state[9],
+                        current_state[10],
+                        jnp.array(0, dtype=jnp.int32),  # 11: hist_accept reset
+                        jnp.array(0, dtype=jnp.int32),  # 12: hist_total reset
+                        current_state[13],
+                        me_state.axes, me_state.logvol_ells,
+                        current_state[17], current_state[17],  # 16: reset calls_at_update to current total_calls
+                        current_state[18], current_state[19],
+                        current_state[20], current_state[21],
+                        jnp.array(config.queue_size, dtype=jnp.int32),  # 22: force queue drain
+                    )
+                else:
+                    current_state = (
+                        current_state[0], current_state[1],
+                        current_state[2], current_state[3],
+                        current_state[4], current_state[5],
+                        current_state[6], current_state[7],
+                        current_state[8], current_state[9],
+                        current_state[10],
+                        jnp.array(0, dtype=jnp.int32),  # 11: hist_accept reset
+                        jnp.array(0, dtype=jnp.int32),  # 12: hist_total reset
+                        current_state[13],
+                        me_state.axes, me_state.logvol_ells,
+                        current_state[17],  # 16: reset calls_at_update to current total_calls
+                        current_state[17],  # 17: total_calls preserved
+                    )
 
-            if config.print_progress and TQDM_AVAILABLE:
+            if pbar is not None:
                 pbar.close()
 
             final_state = current_state
 
-        elif config.print_progress and TQDM_AVAILABLE:
-            pbar = tqdm(total=max_iterations, desc="Nested Sampling",
-                        initial=phase1_iters)
-
-            def progress_cb(it, dlz, lz, loglstar):
+        elif pbar is not None:
+            def progress_cb(it, dlz, lz, loglstar, eff):
                 if int(it) % 100 == 0:
                     pbar.n = int(it)
                     loglstar_val = float(loglstar)
@@ -701,7 +861,7 @@ def run_nested_sampling(
                         loglstar_str = f'{loglstar_val:.1f}'
                     pbar.set_postfix_str(
                         f'logZ: {float(lz):.2f} | dlogZ: {float(dlz):.3f} | '
-                        f'logl*: {loglstar_str}')
+                        f'logl*: {loglstar_str} | eff(%): {float(eff):.1f}')
                     pbar.refresh()
 
             _orig_body = body_fn
@@ -710,14 +870,17 @@ def run_nested_sampling(
                 new_state = _orig_body(state)
                 try:
                     loglstar = jnp.min(new_state[1])
+                    total_calls_val = new_state[17]
+                    eff = (new_state[8] + nlive) * 100.0 / jnp.maximum(total_calls_val, 1)
                     io_callback(progress_cb, None, new_state[8], new_state[7],
-                                 new_state[6], loglstar)
+                                 new_state[6], loglstar, eff)
                 except Exception:
                     pass
                 return new_state
 
             final_state = lax.while_loop(cond_fn, body_fn_prog, init_state)
-            pbar.close()
+            if pbar is not None:
+                pbar.close()
         else:
             final_state = lax.while_loop(cond_fn, body_fn, init_state)
 
@@ -737,9 +900,6 @@ def run_nested_sampling(
     live_x_final = live_x
     live_logL_final = live_logL
     delta_logZ_final = delta_logZ
-
-    if config.verbose:
-        print()
 
     runtime = time.time() - start_time
     actual_iterations = iteration_final
@@ -777,7 +937,9 @@ def run_nested_sampling(
     ])
     weights_all = jnp.exp(log_weights_all)
     logL_all = jnp.concatenate([logL_samples, jnp.array([best_final_logL])])
-    H = float(jnp.sum(weights_all * logL_all)) - logZ
+    # Avoid 0 * (-inf) = NaN: replace -inf logL with 0 before weighting
+    safe_logL = jnp.where(jnp.isfinite(logL_all), logL_all, jnp.array(0.0))
+    H = float(jnp.sum(weights_all * safe_logL)) - logZ
 
     logZ_error = float(jnp.sqrt(jnp.abs(H) / nlive))
 
@@ -786,10 +948,11 @@ def run_nested_sampling(
     acceptance_rate = total_acceptance / total_prop if total_prop > 0 else 0.0
 
     if config.verbose:
-        print(f"Nested sampling completed in {runtime:.2f}s")
+        print()
+        print(f"Sampling completed in {runtime:.2f}s")
         print(f"Total iterations: {actual_iterations} "
-              f"(Phase 1 uniform: {phase1_iters}, Phase 2 rwalk: {actual_iterations - phase1_iters})")
-        print(f"Final logZ: {logZ:.4f} ± {logZ_error:.4f}")
+              f"(uniform: {phase1_iters}, rwalk: {actual_iterations - phase1_iters})")
+        print(f"Final logZ: {logZ:.4f} +/- {logZ_error:.4f}")
         print(f"Information H: {H:.4f}")
         print(f"Final delta_logZ: {float(delta_logZ_final):.6f}")
         print(f"Converged: {float(delta_logZ_final) < delta_logZ_threshold}")

@@ -455,7 +455,51 @@ Separated 5D bimodal: periodic updates correctly find 2 ellipsoids.
 
 ---
 
-## Task 015: GPU-Parallel Likelihood Evaluation
+## Task 003_queue: Dynesty Queue Mode for GPU
+
+### 2026-05-10 - Queue Mode Implementation
+
+**Goal:** Implement Dynesty's multiprocessing queue strategy for GPU via JAX vmap.
+
+**Why Dynesty drains the queue before updating:**
+1. Bound consistency: All candidates in a batch use the same axes.
+2. Statistical accuracy: Accumulated stats from all `queue_size` walks give reliable acceptance rate.
+3. Leftover preservation: Already-computed walks tested against new loglstar.
+
+**Implementation:**
+- `vmap_queue_refill` in `internal_samplers.py`: generates `queue_size` candidates in parallel, each with full `rwalk_K` steps
+- `body_fn_queue` in `sampler.py`: tests ONE candidate per call, iteration advances only on valid, scale updates only at queue drain via `lax.cond`
+- State tuple expanded from 18 to 23 elements (queue_x, queue_logL, queue_nacc, queue_ntot, queue_head)
+- Leftover candidates preserved across iterations (matching Dynesty)
+
+**Verification (20D Gaussian, analytical logZ = -27.673):**
+
+| Config | logZ | err | Speed |
+|--------|------|-----|-------|
+| JNesty Default (queue=8, updates=nlive) | -27.639 | +0.034 | 1269 i/s |
+| JNesty Queue only (queue=8, no updates) | -27.822 | -0.149 | 1671 i/s |
+| JNesty Legacy (batch=auto, no updates) | -27.646 | +0.027 | 1442 i/s |
+| Dynesty (multi+rwalk) | -27.437 | +0.236 | 1273 i/s |
+
+### 2026-05-10 - Dynesty-Matching Defaults
+
+**Changed defaults for `bound='multi'` to match Dynesty:**
+
+1. `bound_update_interval`: `None` → `rwalk_K * nlive` likelihood calls when `bound='multi'` (matching Dynesty's `walks * nlive` calls)
+2. `queue_size`: `None` → `8` when `bound='multi'` (Dynesty default: multiprocessing with multi-ellipsoid)
+3. Removed forced `batch_size=1` for periodic updates (queue mode handles it correctly)
+
+**Bound update interval now counts likelihood calls (not iterations), matching Dynesty exactly:**
+- `sampler.py`: state element 16 now stores `total_calls` at last bound update (was iterations); `chunk_cond` checks `(state[17] - state[16]) >= bound_update_interval` in calls
+- `jnesty.py`: default `bound_update_interval = rwalk_K * nlive` calls (≈ `nlive` iterations); resolution moved after `rwalk_K` auto-tuning
+
+**All 4 demo problems validated:**
+- Gaussian Mixture (2D): logZ = -2.895, consistent with Dynesty (-2.759)
+- Rosenbrock (2D): logZ = -4.408, consistent with Dynesty (-4.299)
+- 20D Gaussian: logZ = -27.582, logZ err = +0.091 (better than Dynesty's -0.340), 1.1x Dynesty speed
+- Gaussian Shells (2D): logZ = -2.805, consistent with Dynesty (-2.668)
+
+**Files changed:** `jnesty.py` (defaults, call-based semantics), `sampler.py` (call-based chunk_cond, state 16 semantics), `compare_queue_mode.py` (updated evaluation)
 
 ### 2026-05-07 - Parallel Walks for GPU Likelihood Parallelism
 
