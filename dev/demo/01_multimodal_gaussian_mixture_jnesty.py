@@ -391,7 +391,7 @@ def main():
     # Trace plot - particle evolution
     print("  Generating trace plot...")
     # Use thin parameter to reduce overplotting for large datasets
-    fig, axes = sampler.plot_trace(thin=5)
+    fig, axes = sampler.plot_trace(thin=1)
     plt.savefig(outdir / 'trace_plot.png', dpi=150, bbox_inches='tight')
     plt.close()
     print("    Saved: trace_plot.png")

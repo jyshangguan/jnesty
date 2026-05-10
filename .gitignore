@@ -115,5 +115,6 @@ cython_debug/
 
 # JNesty specific
 output_*/
+task_*/
 *.npz
 .nfs*

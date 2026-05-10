@@ -164,7 +164,7 @@ def main():
 
     # Trace plot - particle evolution (first 5 dimensions)
     print("  Generating trace plot...")
-    fig, axes = sampler.plot_trace(thin=10)
+    fig, axes = sampler.plot_trace(thin=1)
     plt.savefig(outdir / 'trace_plot.png', dpi=150, bbox_inches='tight')
     plt.close()
     print("    Saved: trace_plot.png")
