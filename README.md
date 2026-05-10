@@ -152,6 +152,9 @@ JNesty's sampling algorithms and bounding methods closely follow the
 acknowledge the dynesty authors for their well-documented, battle-tested
 implementations that served as the primary reference for this work.
 
+We are also inspired by [jaxns](https://github.com/Joshuaalbert/jaxns) to use
+JAX to accelerate nested sampling on GPU.
+
 This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
 
 ## License
