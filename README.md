@@ -33,6 +33,17 @@ pip install -e .
 
 Requires JAX with GPU support (`jax[cuda12]` or similar).
 
+## Documentation
+
+Build the docs locally:
+
+```bash
+pip install sphinx myst-parser sphinx-rtd-theme
+cd doc && sphinx-build -b html . _build/html
+```
+
+Then open `doc/_build/html/index.html` in your browser.
+
 ## Quick Example
 
 ```python
