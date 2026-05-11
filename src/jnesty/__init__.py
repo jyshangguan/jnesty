@@ -11,6 +11,8 @@ Example:
     >>> print(f"logZ = {sampler.results['logz']:.4f}")
 """
 
+__version__ = "0.1.0"
+
 from .jnesty import NestedSampler
 from .sampler import run_nested_sampling, WhileLoopNSConfig, WhileLoopNSResult
 from .results import Results, save_results, load_results
