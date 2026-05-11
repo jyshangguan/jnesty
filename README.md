@@ -44,6 +44,8 @@ cd doc && sphinx-build -b html . _build/html
 
 Then open `doc/_build/html/index.html` in your browser.
 
+**Online documentation:** https://jyshangguan.github.io/jnesty/
+
 ## Quick Example
 
 ```python
