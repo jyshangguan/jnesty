@@ -50,12 +50,12 @@ It seems that we only use a single GPU in the sampling when there are more avail
 
 
 ## Multi-ellipsoid bounding
-
+[Done]
 It seems that our multi-ellipsoid bounding is much slower than the dynesty. Please investigate if there is anything we can accelerate.
 
 
 # Unit tests
-
+[Done]
 I want you to add unit tests to confirm the robustness and speed of all the key functions. Please check the code carefully and give me a plan.
 
 
@@ -64,5 +64,21 @@ I want you to add unit tests to confirm the robustness and speed of all the key 
 Investigated annealed NS (temperature parameter) for peaked likelihoods. All three approaches tested produced biased posteriors — temperature disrupts the prior mass–likelihood relationship that NS relies on. Code rolled back.
 
 # Debug
-
+[Done]
 1. Please check why the trace plot of jnesty seems to have much less point than that from dynesty, while the number of samples are not much different (please verify it with the demo 01 results and plots). I understand that jnesty effectively use the same plot function as dynesty. Please help me to understand if there is any bugs.
+
+# Doc
+
+I want you to check the code usage carefully and generate a doc. The doc should include the following pages,
+
+(1) Basic introduction, including the installation and basic usage. 
+(2) A page to introduce the basic method. We mainly refer to dynesty for the rwalk and multi-ellipsoid bounding, but this page provides a brief explanation on how our sampling method works.
+(3) Convert the demos into four examples in the example page. We just show the JNesty results. No need to show the dynesty results.
+(4) A API page that explains all the functions.
+
+Please think carefully and provide me a plan.
+
+
+# Version
+
+Make the current version 0.1.0. Include this information in the package's __verssion__ as well as the doc.
