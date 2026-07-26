@@ -9,6 +9,38 @@
    :show-inheritance:
 ```
 
+
+
+## DynamicNestedSampler
+
+```{eval-rst}
+.. autoclass:: jnesty.DynamicNestedSampler
+   :members:
+   :show-inheritance:
+```
+
+### Dynamic Module Functions
+
+```{eval-rst}
+.. autofunction:: jnesty.dynamic.compute_integrals
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynamic.kish_ess
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynamic.weight_function
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynamic.stopping_function
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynamic.combine_saved_and_new
+```
+
 ## Results
 
 ```{eval-rst}
