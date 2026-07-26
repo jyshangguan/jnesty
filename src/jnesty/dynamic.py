@@ -478,81 +478,64 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
 def generate_fresh_batch_points(loglikelihood_fn, prior_transform_fn,
                                      subset_u, logl_min, ndim, nlive_batch,
                                      bound_type, scale, key,
-                                     oversample=8, max_attempts=100):
-    """Generate nlive_batch fresh live points above logl_min.
+                                     _compiled_logl=None):
+    """Generate nlive_batch fresh live points above logl_min in a single
+    GPU batch.  Matches dynesty's _new_point(logl_min) intent: independent
+    uniform samples from the constrained prior.
 
-    Matches dynesty's _new_point(logl_min) behavior: produces independent
-    uniform samples from the constrained prior (logL > logl_min) by
-    rejection sampling from the fitted bound.
-
-    The subset-selected points are used ONLY to fit the bound (matching
-    dynesty's _configure_batch_sampler flow).  The returned fresh points
-    are independent of the saved run.
+    Single-shot design: sample nlive_batch*8 points from the unit cube,
+    evaluate logL in one vmap'd call, filter above logl_min, take first
+    nlive_batch.  No Python loop, single JIT dispatch.
     """
     import jax
     import jax.numpy as jnp
-    from .bounding import get_bound
 
-    # Fit bound to subset-selected points (matching dynesty's update_bound_if_needed)
-    bound_obj = get_bound(bound_type, ndim, max_ellipsoids=20, scale=scale)
-    subset_j = jnp.asarray(subset_u)
-    if bound_type != 'none':
-        bound_obj.fit(subset_j)
+    # Build or reuse compiled logL evaluator
+    if _compiled_logl is None:
+        def loglike_wrapped(x):
+            return loglikelihood_fn(prior_transform_fn(x))
+        _compiled_logl = jax.jit(jax.vmap(loglike_wrapped))
 
-    # Wrap likelihood for unit-cube evaluation
-    def loglike_wrapped(x):
-        return loglikelihood_fn(prior_transform_fn(x))
+    # Single large batch: 8x oversampling
+    n_sample = nlive_batch * 8
+    sk, key = jax.random.split(key)
+    cand_u = jax.random.uniform(sk, shape=(n_sample, ndim))
+    cand_logl = np.asarray(_compiled_logl(cand_u))
+    cand_u_np = np.asarray(cand_u)
 
-    logl_min_j = jnp.asarray(logl_min)
-    collected_u = []
-    collected_logl = []
-    n_collected = 0
-    attempts = 0
+    # Filter above logl_min
+    valid = cand_logl > float(logl_min)
+    n_valid = int(valid.sum())
 
-    while n_collected < nlive_batch and attempts < max_attempts:
-        attempts += 1
-        n_need = nlive_batch - n_collected
-        n_sample = n_need * oversample
+    if n_valid >= nlive_batch:
+        # Enough fresh points in one shot
+        fresh_u = cand_u_np[valid][:nlive_batch]
+        fresh_logl = cand_logl[valid][:nlive_batch]
+    else:
+        # Fallback: one more batch, then fill from subset
+        sk2, key = jax.random.split(key)
+        cand_u2 = jax.random.uniform(sk2, shape=(n_sample, ndim))
+        cand_logl2 = np.asarray(_compiled_logl(cand_u2))
+        cand_u2_np = np.asarray(cand_u2)
+        valid2 = cand_logl2 > float(logl_min)
+        all_valid_u = np.concatenate([cand_u_np[valid], cand_u2_np[valid2]])
+        all_valid_logl = np.concatenate([cand_logl[valid], cand_logl2[valid2]])
+        if len(all_valid_u) >= nlive_batch:
+            fresh_u = all_valid_u[:nlive_batch]
+            fresh_logl = all_valid_logl[:nlive_batch]
+        else:
+            # Last resort: use subset-selected points for remaining slots
+            n_from_subset = nlive_batch - len(all_valid_u)
+            fresh_u = np.concatenate([all_valid_u, np.asarray(subset_u)[:n_from_subset]])
+            fresh_logl = np.concatenate([all_valid_logl,
+                                         np.asarray([_compiled_logl(jnp.asarray([subset_u[i]]))[0]
+                                                      for i in range(n_from_subset)])])
 
-        # Sample from unit cube (guaranteed uniform in prior)
-        # The fitted bound approach produces too-tight sampling; unit-cube
-        # rejection is slower but correct, matching dynesty's _new_point intent.
-        sk, key = jax.random.split(key)
-        cand_u = jax.random.uniform(sk, shape=(n_sample, ndim))
-
-        # Evaluate logL in batch
-        cand_logl = jax.vmap(loglike_wrapped)(cand_u)
-        cand_logl_np = np.asarray(cand_logl)
-        cand_u_np = np.asarray(cand_u)
-
-        # Keep points above logl_min
-        valid = cand_logl_np > float(logl_min)
-        n_valid = int(valid.sum())
-        if n_valid > 0:
-            valid_u = cand_u_np[valid]
-            valid_logl = cand_logl_np[valid]
-            n_take = min(n_valid, n_need)
-            collected_u.append(valid_u[:n_take])
-            collected_logl.append(valid_logl[:n_take])
-            n_collected += n_take
-
-    if n_collected < nlive_batch:
-        # Fallback: use subset-selected points for remaining slots
-        remaining = nlive_batch - n_collected
-        collected_u.append(np.asarray(subset_u)[:remaining])
-        collected_logl.append(np.asarray(
-            [loglike_wrapped(jnp.asarray(subset_u[i]))
-             for i in range(remaining)]))
-        n_collected = nlive_batch
-
-    fresh_u = np.concatenate(collected_u, axis=0)[:nlive_batch]
-    fresh_logl = np.concatenate(collected_logl, axis=0)[:nlive_batch]
-
-    # Replace any remaining -inf with float32-safe sentinel
+    # Replace -inf with float32-safe sentinel
     safe_min = np.finfo(fresh_logl.dtype).min / 2
     fresh_logl = np.where(np.isneginf(fresh_logl), safe_min, fresh_logl)
 
-    return fresh_u, fresh_logl
+    return fresh_u, fresh_logl, _compiled_logl
 
 
 def _build_static_sampler(loglikelihood, prior_transform, ndim,
@@ -679,10 +662,11 @@ class DynamicNestedSampler:
                 # dynesty's _new_point(logl_min) behavior.
                 from jax import random as jrandom
                 fresh_key = jrandom.PRNGKey(int(rstate.integers(0, 2**31 - 1)))
-                fresh_u, fresh_logl = generate_fresh_batch_points(
+                fresh_u, fresh_logl, self._compiled_logl = generate_fresh_batch_points(
                     self.loglikelihood, self.prior_transform,
                     live_u, logl_min_eff, self.ndim, nlive_batch,
-                    self.bound, scale, fresh_key)
+                    self.bound, scale, fresh_key,
+                    _compiled_logl=getattr(self, '_compiled_logl', None))
                 init_x = jnp.asarray(fresh_u)
                 init_logL = jnp.asarray(fresh_logl)
                 logl_min_b = logl_min_eff
