@@ -172,6 +172,15 @@ class NestedSampler:
         max_iterations: int = 100000,
         delta_logZ_threshold: float = 0.01,
         print_progress: bool = True,
+        logl_min: float = -float('inf'),
+        logl_max: float = float('inf'),
+        init_live_x=None,
+        init_live_logL=None,
+        init_logvol: float = 0.0,
+        init_logZ_val: float = -float('inf'),
+        init_logX: float = 0.0,
+        init_ncall: int = 0,
+        init_iter_offset: int = 0,
     ) -> None:
         """
         Run the nested sampling algorithm.
@@ -184,6 +193,13 @@ class NestedSampler:
             Convergence threshold. Default: 0.01
         print_progress : bool, optional
             Show progress bar. Default: True
+        logl_min, logl_max : float, optional
+            Batch log-likelihood bounds (used by DynamicNestedSampler).
+        init_live_x, init_live_logL : array-like, optional
+            Pre-sampled seed live points (unit cube) and their logL values.
+            If provided, Phase 1 uniform rejection is skipped.
+        init_logvol : float, optional
+            Starting log-volume (path-A fallback when -inf-logL points were rejected).
         """
         if self.verbose:
             print("=" * 70)
@@ -222,6 +238,15 @@ class NestedSampler:
             unit_cube_batch_size=self.unit_cube_batch_size,
             min_eff=self.min_eff,
             min_ncall=self.min_ncall,
+            logl_min=logl_min,
+            logl_max=logl_max,
+            init_live_x=init_live_x,
+            init_live_logL=init_live_logL,
+            init_logvol=init_logvol,
+            init_logZ_val=init_logZ_val,
+            init_logX=init_logX,
+            init_ncall=init_ncall,
+            init_iter_offset=init_iter_offset,
         )
 
         key = random.PRNGKey(42)

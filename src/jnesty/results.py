@@ -167,7 +167,9 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         logL_all = np.concatenate([logL_samples, live_logL_sorted])
         logvol_all = np.concatenate([logvol_dead, logvol_live])
         samples_all = np.concatenate([samples, live_samples_sorted], axis=0)
-        samples_u_all = np.concatenate([samples, live_x_sorted], axis=0)
+        # samples_u should be unit-cube coords: dead_u from raw result, live are already unit cube
+        dead_u = _convert_to_numpy(r.samples_u) if r.samples_u is not None else samples
+        samples_u_all = np.concatenate([dead_u, live_x_sorted], axis=0)
         n_total = len(logL_all)
 
         # Recompute logwt for full sequence (trapezoidal)
@@ -185,11 +187,18 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         logL_all = logL_samples
         logvol_all = logvol_dead
         samples_all = samples
-        samples_u_all = samples
+        dead_u2 = _convert_to_numpy(r.samples_u) if r.samples_u is not None else samples
+        samples_u_all = dead_u2
         logwt_all = logwt_dead
         logz_trajectory = np.logaddexp.accumulate(logwt_dead)
         logzerr_trajectory = np.full(n_dead, r.logZ_error)
         n_total = n_dead
+
+    # Replace any lingering -inf logL values with dynesty's _LOWL_VAL
+    # so downstream integrals and plotting functions produce correct results.
+    # Replace -inf with a large negative float32-safe value
+    _LOWL_VAL = np.finfo(logL_all.dtype).min / 2 if hasattr(logL_all, 'dtype') else -1.0e300
+    logL_all = np.where(np.isneginf(logL_all), _LOWL_VAL, logL_all)
 
     results_dict = {
         # Evidence

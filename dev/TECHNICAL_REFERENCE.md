@@ -230,3 +230,62 @@ These are representative figures for a Gaussian likelihood with `nlive=500`, `rw
 | Early stopping | Python-level check after each batch | `lax.while_loop` condition checks every iteration | True iteration-granular convergence without wasted iterations |
 | Volume accounting (live points) | Individual point volumes | Equal-split: `logX_final - log(nlive)` for all live points | Simpler; matches the standard NS approximation |
 | Legacy sampler | N/A | `sampler.py` uses `lax.scan` with Metropolis | Retained for reference; not active |
+
+
+---
+
+## Dynamic Nested Sampling (`dynamic.py`)
+
+### Module responsibility
+
+| Sub-component | Responsibility |
+|---|---|
+| `DynamicNestedSampler` | User-facing class. Orchestrates a base static run + sequential batches. |
+| `compute_integrals` | Faithful port of `dynesty.utils.compute_integrals` (trapezoidal weights, logzvar). |
+| `kish_ess` | Kish ESS from unnormalised log-weights. |
+| `compute_weights` | (zweight, pweight) per sample (dynesty port). |
+| `weight_function` | (logl_min, logl_max) bounds for the next batch (dynesty port). |
+| `jitter_run` | Single prior-volume MC realisation for logZ uncertainty. |
+| `stopping_function` | pfrac-weighted posterior/evidence stopping criterion. |
+| `seed_initial_live_points` | Path-A seeding: uniform from prior with -inf-logL fallback. |
+| `seed_batch_from_saved` | Path-B seeding: volume-weighted resample of saved dead points. |
+| `combine_saved_and_new` | Merge a new batch run into the saved run (plateau-aware logvol). |
+
+### Data flow
+
+```
+User code
+  |
+  v
+DynamicNestedSampler.run_nested()
+  |
+  +-- Base run: NestedSampler.run_nested()  (existing static engine)
+  |     results saved_run initialised
+  |
+  +-- Batch loop (maxbatch iterations):
+  |     |
+  |     +-- stopping_function(saved_run) -- stop if <= 1
+  |     +-- weight_function(saved_run) -- (logl_min, logl_max)
+  |     +-- seed_batch_from_saved OR fresh-from-prior
+  |     +-- NestedSampler.run_nested(init_live_x=..., logl_max=...)
+  |     +-- combine_saved_and_new -- plateau-aware merge, recompute logvol
+  |
+  v
+results dict (Dynesty-compatible, includes samples_n, samples_batch)
+```
+
+### Faithfulness to dynesty
+
+The dynamic module is a **faithful port** of dynesty 3.x. Numerical
+equality on identical inputs is enforced by F1-F9 unit tests in
+`tests/unit/test_dynamic_faithful.py`. JNesty-specific GPU machinery
+(queue-mode within each batch, JIT-compiled while_loop, traced
+multi-ellipsoid state) is allowed to differ from dynesty's CPU implementation;
+the statistical result must match.
+
+### Validation
+
+`dev/task_004_dynamic/dev_dynamic/run_tests.py` runs a 5-config test
+matrix on 4 reference problems (P1-P4) with 7 hard pass gates. Output is
+written to `REPORT.md` for direct side-by-side visual comparison with the
+dynesty docs.

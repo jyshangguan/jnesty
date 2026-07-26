@@ -49,6 +49,17 @@ class WhileLoopNSConfig(NamedTuple):
     unit_cube_batch_size: int = 200  # batch size for uniform rejection phase
     min_eff: float = 10.0           # efficiency threshold to switch to rwalk (%)
     min_ncall: int = None           # min calls before switch (default 2*nlive)
+    # --- dynamic-NS extensions (defaults preserve static behaviour) ---
+    logl_min: float = -float('inf')   # lower logL bound (informational)
+    logl_max: float = float('inf')    # upper logL bound: terminate once worst_logL exceeds this
+    init_live_x: Optional[jnp.ndarray] = None       # (nlive, ndim) seed live points in unit cube
+    init_live_logL: Optional[jnp.ndarray] = None    # (nlive,) seed live logL values
+    init_logvol: float = 0.0          # starting log-volume (non-zero for path-A fallback)
+    # --- pre-loaded saved history (batch-convergence fix) ---
+    init_logZ_val: float = -float('inf')  # starting logZ (pre-loaded from saved run)
+    init_logX: float = 0.0               # starting log-vol (saved logvol at vol_idx)
+    init_ncall: int = 0                  # likelihood calls from pre-loaded history
+    init_iter_offset: int = 0            # iteration count from pre-loaded history
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -66,6 +77,9 @@ class WhileLoopNSResult(NamedTuple):
     acceptance_rate: float
     live_x: jnp.ndarray = None
     live_logL: jnp.ndarray = None
+    samples_u: jnp.ndarray = None   # dead-point unit-cube coords (before prior transform)
+    init_logX: float = 0.0          # pre-loaded logvol offset (batch mode)
+    init_iter_offset: int = 0       # pre-loaded iteration count (batch mode)
 
 
 def estimate_batch_size_from_memory(
@@ -108,11 +122,20 @@ def estimate_batch_size_from_memory(
             print(f"WARNING: Memory probe failed ({e}). Falling back to batch_size=1.")
         return 1
 
-    ma = compiled.memory_analysis()
+    ma = compiled.memory_analysis() if hasattr(compiled, 'memory_analysis') else None
     if ma is None:
+        # memory_analysis() is unavailable in some jaxlib versions; fall back
         return requested_batch_size
 
-    peak = ma.peak_memory_in_bytes
+    # Different jaxlib versions expose different attrs; try both.
+    peak = getattr(ma, 'peak_memory_in_bytes', None)
+    if peak is None:
+        # fallback: temp + argument + output as a rough upper bound
+        peak = (getattr(ma, 'temp_size_in_bytes', 0)
+                + getattr(ma, 'argument_size_in_bytes', 0)
+                + getattr(ma, 'output_size_in_bytes', 0))
+        if peak <= 0:
+            return requested_batch_size
     per_walk = max(1, peak // trial_batch)
 
     available = int(stats['bytes_limit'] * memory_frac)
@@ -137,7 +160,11 @@ def _batch_logL_eval(loglikelihood_fn, live_x, batch_size=50):
     for i in range(0, nlive, batch_size):
         batch = live_x[i:i + batch_size]
         results.append(jnp.vectorize(loglikelihood_fn, signature='(n)->()')(batch))
-    return jnp.concatenate(results)
+    logL = jnp.concatenate(results)
+    # Replace -inf with a float32-safe large negative value
+    safe_min = jnp.finfo(logL.dtype).min / 2
+    logL = jnp.where(jnp.isneginf(logL), safe_min, logL)
+    return logL
 
 
 def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
@@ -300,10 +327,19 @@ def run_nested_sampling(
 
     start_time = time.time()
 
-    # Initialize live points from prior
-    keys = random.split(key, nlive + 1)
-    live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
-    live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
+    # Initialize live points: use provided seeds (dynamic-batch mode) or sample fresh
+    if config.init_live_x is not None and config.init_live_logL is not None:
+        live_x = jnp.asarray(config.init_live_x)
+        live_logL = jnp.asarray(config.init_live_logL)
+        keys = random.split(key, 1)
+        key = keys[0]
+    else:
+        keys = random.split(key, nlive + 1)
+        live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
+        live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
+        # Replace -inf logL with float32-safe large negative value
+        safe_min = jnp.finfo(live_logL.dtype).min / 2
+        live_logL = jnp.where(jnp.isneginf(live_logL), safe_min, live_logL)
 
     # Pre-allocate buffers — use dtype matching the likelihood output
     buf_dtype = live_logL.dtype
@@ -312,45 +348,55 @@ def run_nested_sampling(
     delta_logZ_buffer = jnp.full(max_iterations, jnp.inf, dtype=buf_dtype)
     scale_buffer = jnp.full(max_iterations, jnp.inf, dtype=buf_dtype)
 
-    logZ = jnp.array(-jnp.inf, dtype=buf_dtype)
+    if config.init_logZ_val > -1e300:
+        logZ = jnp.array(config.init_logZ_val, dtype=buf_dtype)
+    else:
+        logZ = jnp.array(-jnp.inf, dtype=buf_dtype)
     max_live_logL = jnp.max(live_logL)
     delta_logZ = jax.scipy.special.logsumexp(
         jnp.array([0.0, max_live_logL - logZ], dtype=buf_dtype)
     )
 
     # === PHASE 1: Uniform rejection sampling ===
-    phase1_result = _run_uniform_phase(
-        loglikelihood_for_jit, live_x, live_logL,
-        worst_x_buffer, worst_logL_buffer,
-        delta_logZ_buffer, scale_buffer,
-        logZ, delta_logZ,
-        jnp.array(0),  # iteration offset
-        keys[-1],
-        nlive=nlive,
-        max_iterations=max_iterations,
-        delta_logZ_threshold=delta_logZ_threshold,
-        unit_cube_batch_size=config.unit_cube_batch_size,
-        min_eff=config.min_eff,
-        min_ncall=min_ncall,
-        ndim=ndim,
-    )
+    # Skip when seed live points were provided externally (dynamic-batch mode).
+    if config.init_live_x is not None and config.init_live_logL is not None:
+        phase1_iters = 0  # Phase 1 did not run; pre-load offset handled separately
+        phase1_total_calls = nlive  # accounted for by the caller that seeded
+        phase1_eff = 0.0
+        converged_phase1 = float(delta_logZ) < delta_logZ_threshold
+    else:
+        phase1_result = _run_uniform_phase(
+            loglikelihood_for_jit, live_x, live_logL,
+            worst_x_buffer, worst_logL_buffer,
+            delta_logZ_buffer, scale_buffer,
+            logZ, delta_logZ,
+            jnp.array(0),  # iteration offset
+            keys[-1],
+            nlive=nlive,
+            max_iterations=max_iterations,
+            delta_logZ_threshold=delta_logZ_threshold,
+            unit_cube_batch_size=config.unit_cube_batch_size,
+            min_eff=config.min_eff,
+            min_ncall=min_ncall,
+            ndim=ndim,
+        )
 
-    # Unpack Phase 1 results
-    live_x = phase1_result[0]
-    live_logL = phase1_result[1]
-    worst_x_buffer = phase1_result[2]
-    worst_logL_buffer = phase1_result[3]
-    delta_logZ_buffer = phase1_result[4]
-    scale_buffer = phase1_result[5]
-    logZ = phase1_result[6]
-    delta_logZ = phase1_result[7]
-    phase1_iters = int(phase1_result[8])
-    key = phase1_result[9]
+        # Unpack Phase 1 results
+        live_x = phase1_result[0]
+        live_logL = phase1_result[1]
+        worst_x_buffer = phase1_result[2]
+        worst_logL_buffer = phase1_result[3]
+        delta_logZ_buffer = phase1_result[4]
+        scale_buffer = phase1_result[5]
+        logZ = phase1_result[6]
+        delta_logZ = phase1_result[7]
+        phase1_iters = int(phase1_result[8])
+        key = phase1_result[9]
 
-    phase1_total_calls = int(phase1_result[11])
-    phase1_eff = (phase1_iters + nlive) * 100.0 / max(phase1_total_calls, 1)
+        phase1_total_calls = int(phase1_result[11])
+        phase1_eff = (phase1_iters + nlive) * 100.0 / max(phase1_total_calls, 1)
 
-    converged_phase1 = float(delta_logZ) < delta_logZ_threshold
+        converged_phase1 = float(delta_logZ) < delta_logZ_threshold
 
     # Update progress bar after Phase 1
     if pbar is not None:
@@ -449,7 +495,7 @@ def run_nested_sampling(
             scale_buffer,            # 5
             logZ,                    # 6
             delta_logZ,              # 7
-            jnp.array(phase1_iters, dtype=jnp.int32), # 8  iteration
+            jnp.array(phase1_iters + config.init_iter_offset, dtype=jnp.int32), # 8  iteration
             key,                     # 9  key
             current_scale,           # 10 scale
             jnp.array(0, dtype=jnp.int32),  # 11 hist_accept (accumulated, reset at bound update)
@@ -468,10 +514,16 @@ def run_nested_sampling(
         else:
             init_state = _base_state
 
+        _logl_max = jnp.asarray(config.logl_max, dtype=buf_dtype)
+
         def cond_fn(state):
             dlz = state[7]
             it = state[8]
-            return (dlz >= delta_logZ_threshold) & (it < max_iterations)
+            # live_logL is state[1]; worst is its min; terminate if worst > logl_max
+            worst = jnp.min(state[1])
+            return ((dlz >= delta_logZ_threshold)
+                    & (it < max_iterations)
+                    & (worst < _logl_max))
 
         def body_fn(state):
             live_x = state[0]
@@ -536,7 +588,12 @@ def run_nested_sampling(
                         ell_idx = random.choice(sk3, logvol, p=ell_probs)
                         ba = me_axes_state[ell_idx]
                 else:
-                    ba = _bound_axes
+                    # Broadcast (ndim, ndim) -> (batch, ndim, ndim) for vmapped walk
+                    if effective_batch_size > 1:
+                        ba = jnp.broadcast_to(_bound_axes,
+                            (effective_batch_size,) + _bound_axes.shape)
+                    else:
+                        ba = _bound_axes
 
                 x_cand, logL_cand, n_acc, n_tot = sampler_obj.sample(
                     wk, x_starts, worst_logL, loglikelihood_for_jit,
@@ -568,9 +625,11 @@ def run_nested_sampling(
             live_x_new = live_x.at[worst_idx].set(x_new)
             live_logL_new = live_logL.at[worst_idx].set(logL_new)
 
-            # 7. Update evidence
-            logX_old = -iteration / nlive
-            logX_new_val = -(iteration + 1) / nlive
+            # 7. Update evidence (exact formula, supports pre-loaded history)
+            _dlv = jnp.log((nlive + 1.0) / nlive)  # dynesty exact formula
+            _init_logX = jnp.asarray(config.init_logX, dtype=buf_dtype)
+            logX_old = _init_logX - (iteration - config.init_iter_offset) * _dlv
+            logX_new_val = _init_logX - (iteration - config.init_iter_offset + 1) * _dlv
             log_dX = logsubexp(logX_old, logX_new_val)
             log_dZ = worst_logL + log_dX
             logZ_new = jnp.logaddexp(state[6], log_dZ)
@@ -612,13 +671,18 @@ def run_nested_sampling(
             _ncdim_q = config.ncdim if config.ncdim else ndim
 
             # cond_fn with safety limit on total calls
+            _logl_max_q = jnp.asarray(config.logl_max, dtype=buf_dtype)
             _max_calls_limit = max_iterations * rwalk_K * 20
 
             def cond_fn_q(state):
                 dlz = state[7]
                 it = state[8]
                 calls = state[17]
-                return (dlz >= delta_logZ_threshold) & (it < max_iterations) & (calls < _max_calls_limit)
+                worst = jnp.min(state[1])
+                return ((dlz >= delta_logZ_threshold)
+                        & (it < max_iterations)
+                        & (calls < _max_calls_limit)
+                        & (worst < _logl_max_q))
 
             def body_fn_q(state):
                 live_x = state[0]
@@ -687,9 +751,11 @@ def run_nested_sampling(
                 new_hist_total = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), hist_total)
                 final_head = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), new_head)
 
-                # 8. Evidence update (only when valid)
-                logX_old = -iteration / nlive
-                logX_new_val = -(iteration + 1) / nlive
+                # 8. Evidence update (exact formula, supports pre-loaded history)
+                _dlv_q = jnp.log((nlive + 1.0) / nlive)  # dynesty exact formula
+                _init_logX_q = jnp.asarray(config.init_logX, dtype=buf_dtype)
+                logX_old = _init_logX_q - (iteration - config.init_iter_offset) * _dlv_q
+                logX_new_val = _init_logX_q - (iteration - config.init_iter_offset + 1) * _dlv_q
                 log_dX = logsubexp(logX_old, logX_new_val)
                 log_dZ = worst_logL + log_dX
                 logZ_new = jnp.where(valid, jnp.logaddexp(state[6], log_dZ), state[6])
@@ -908,17 +974,26 @@ def run_nested_sampling(
     runtime = time.time() - start_time
     actual_iterations = iteration_final
 
+    # Slice buffer entries, skipping pre-loaded history if any
+    _off = config.init_iter_offset
+    _n = actual_iterations
+
+    # Store unit-cube coords before transform
+    samples_u = worst_x_buffer[_off:_n]
+
     # Transform samples to physical space
     if prior_transform_fn is not None:
         samples = jnp.vectorize(prior_transform_fn, signature='(n)->(n)')(
-            worst_x_buffer[:actual_iterations]
+            worst_x_buffer[_off:_n]
         )
     else:
-        samples = worst_x_buffer[:actual_iterations]
+        samples = worst_x_buffer[_off:_n]
 
-    logL_samples = worst_logL_buffer[:actual_iterations]
-    delta_logZ_trajectory = delta_logZ_buffer[:actual_iterations]
-    scale_trajectory = scale_buffer[:actual_iterations]
+    logL_samples = worst_logL_buffer[_off:_n]
+    delta_logZ_trajectory = delta_logZ_buffer[_off:_n]
+    scale_trajectory = scale_buffer[_off:_n]
+    # Adjust actual_iterations to exclude pre-loaded history
+    actual_iterations = _n - _off
     best_final_logL = jnp.max(live_logL_final)
 
     # Recalculate final logZ and H
@@ -977,4 +1052,7 @@ def run_nested_sampling(
         acceptance_rate=acceptance_rate,
         live_x=live_x_final,
         live_logL=live_logL_final,
+        samples_u=samples_u,
+        init_logX=config.init_logX,
+        init_iter_offset=config.init_iter_offset,
     )

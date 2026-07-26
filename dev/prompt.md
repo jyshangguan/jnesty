@@ -81,4 +81,45 @@ Please think carefully and provide me a plan.
 
 # Version
 
-Make the current version 0.1.0. Include this information in the package's __verssion__ as well as the doc.
+Make the current version 0.1.0. Include this information in the package's __version__ as well as the doc.
+
+
+# Implement the dynamic sampling
+
+The current JNesty code only have the basic nested sampling method. I want to implement the dynamic nesty sampling. Please investigate the dynesty doc and code, and understand what should be added in JNesty. JNesty should take the full advantage of the GPU acceleration. Please also check this page, https://dynesty.readthedocs.io/en/latest/dynamic.html, to design a clear test so that we can quantitatively check if the code is correctly implementedd. Please think carefully and make a plan. I want you to design a loop so that you can automatically make tests and check to confirm if the code works as expected.
+
+Please work in `/home/shangguan/Softwares/my_modules/JNesty/dev/task_004_dynamic` for this development. Please make a `dev_dynamic` for this task. Please read all the markdown files in `/home/shangguan/Softwares/my_modules/jnesty/dev` to understand the development strategy and keep the rules.
+
+
+## Check
+
+In the example, `/home/shangguan/Softwares/my_modules/jnesty/dev/demo/05_dynamic_gaussian_jnesty.py`, I want to plot the trace plot for the posterior/evidence split weights to be 80/20, 100/0, and 0/100, to illustrate that the dynamic sampling works.
+
+Sorry, for the traceplot, I mean using `dyplot.runplot` to generate the plot. Please revise the code and re-run it.
+
+I actually want to directly compare the results produced by
+
+```
+fig, axes = dyplot.runplot(res, color='black', mark_final_live=False,
+                           logplot=True)  # static run
+fig, axes = dyplot.runplot(dres, color='red', logplot=True,
+                           fig=(fig, axes))  # default dynamic run
+fig, axes = dyplot.runplot(dres_p, color='blue', logplot=True,
+                           fig=(fig, axes))  # posterior dynamic run
+fig, axes = dyplot.runplot(dres_z, color='limegreen', logplot=True,
+                           lnz_truth=lnz_truth,  truth_color='orange',
+                           fig=(fig, axes))  # evidence dynamic run
+fig.tight_layout()
+```
+
+in `https://dynesty.readthedocs.io/en/latest/dynamic.html#`. Please try to use the same likelihood and sampling setups and make the same plot, so that I can have one-to-one comparison.
+
+## Debug
+
+I think the result plot is different from the dynesty website. I suggest you to run the same sampling with dynesty and directly compare the results with JNesty. I want quantitative comparison and make sure that JNesty got essentially the same results as dynesty in the test example. As for the result plot, just over plot the sampling results of dynesty and JNesty for a static sampling case and a dynamic sampling case (with posterior/evidence split 80/20).
+
+Good. However, please compare the sample results in more detail. I think the live point history as the function of -lnX (the first panel of the runplot) is very different for dynesty and JNesty for dynamic sampling. The other curves are also noticibly different. The static sampling also show some difference. Please check and try to find the problem.
+
+The results are still quite different. Please investigate the dynesty code for the dynamic sampler part and explain the algorithm step by step. Then, compare your current implementation in JNesty. Make point-to-point comparison and explain the differences. In this way, let's see what may course the difference. Note that our goal is to get almost identical results.
+
+I do not understand why the live point curve (the first panel of the runplot) is very irregular. I expect the injection to be at fixed step while the live point decrease gradually after the injection. The dynesty curve behaves like this while the JNesty curve does not.
