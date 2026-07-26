@@ -123,3 +123,9 @@ Good. However, please compare the sample results in more detail. I think the liv
 The results are still quite different. Please investigate the dynesty code for the dynamic sampler part and explain the algorithm step by step. Then, compare your current implementation in JNesty. Make point-to-point comparison and explain the differences. In this way, let's see what may course the difference. Note that our goal is to get almost identical results.
 
 I do not understand why the live point curve (the first panel of the runplot) is very irregular. I expect the injection to be at fixed step while the live point decrease gradually after the injection. The dynesty curve behaves like this while the JNesty curve does not.
+
+# Make demos
+
+Move /home/shangguan/Softwares/my_modules/jnesty/dev/demo/05_dynamic_gaussian_jnesty.py and the results folder to /home/shangguan/Softwares/my_modules/jnesty/dev/task_004_dynamic. Meanwhile, add the demo of dynamic sampling for dynesty and jnesty separately as the other demo scripts.
+
+Then, add the example to the doc, /home/shangguan/Softwares/my_modules/jnesty/doc/examples.md. For completeness, identify the necessary places to explain the dynamic nested sampling in the doc. After finish this, merge the changes to the main branch again and push to github. Still come back to the dev_dynamic branch in the end.
