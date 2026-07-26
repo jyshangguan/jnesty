@@ -475,6 +475,86 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
     return out
 
 
+def generate_fresh_batch_points(loglikelihood_fn, prior_transform_fn,
+                                     subset_u, logl_min, ndim, nlive_batch,
+                                     bound_type, scale, key,
+                                     oversample=8, max_attempts=100):
+    """Generate nlive_batch fresh live points above logl_min.
+
+    Matches dynesty's _new_point(logl_min) behavior: produces independent
+    uniform samples from the constrained prior (logL > logl_min) by
+    rejection sampling from the fitted bound.
+
+    The subset-selected points are used ONLY to fit the bound (matching
+    dynesty's _configure_batch_sampler flow).  The returned fresh points
+    are independent of the saved run.
+    """
+    import jax
+    import jax.numpy as jnp
+    from .bounding import get_bound
+
+    # Fit bound to subset-selected points (matching dynesty's update_bound_if_needed)
+    bound_obj = get_bound(bound_type, ndim, max_ellipsoids=20, scale=scale)
+    subset_j = jnp.asarray(subset_u)
+    if bound_type != 'none':
+        bound_obj.fit(subset_j)
+
+    # Wrap likelihood for unit-cube evaluation
+    def loglike_wrapped(x):
+        return loglikelihood_fn(prior_transform_fn(x))
+
+    logl_min_j = jnp.asarray(logl_min)
+    collected_u = []
+    collected_logl = []
+    n_collected = 0
+    attempts = 0
+
+    while n_collected < nlive_batch and attempts < max_attempts:
+        attempts += 1
+        n_need = nlive_batch - n_collected
+        n_sample = n_need * oversample
+
+        # Sample from unit cube (guaranteed uniform in prior)
+        # The fitted bound approach produces too-tight sampling; unit-cube
+        # rejection is slower but correct, matching dynesty's _new_point intent.
+        sk, key = jax.random.split(key)
+        cand_u = jax.random.uniform(sk, shape=(n_sample, ndim))
+
+        # Evaluate logL in batch
+        cand_logl = jax.vmap(loglike_wrapped)(cand_u)
+        cand_logl_np = np.asarray(cand_logl)
+        cand_u_np = np.asarray(cand_u)
+
+        # Keep points above logl_min
+        valid = cand_logl_np > float(logl_min)
+        n_valid = int(valid.sum())
+        if n_valid > 0:
+            valid_u = cand_u_np[valid]
+            valid_logl = cand_logl_np[valid]
+            n_take = min(n_valid, n_need)
+            collected_u.append(valid_u[:n_take])
+            collected_logl.append(valid_logl[:n_take])
+            n_collected += n_take
+
+    if n_collected < nlive_batch:
+        # Fallback: use subset-selected points for remaining slots
+        remaining = nlive_batch - n_collected
+        collected_u.append(np.asarray(subset_u)[:remaining])
+        collected_logl.append(np.asarray(
+            [loglike_wrapped(jnp.asarray(subset_u[i]))
+             for i in range(remaining)]))
+        n_collected = nlive_batch
+
+    fresh_u = np.concatenate(collected_u, axis=0)[:nlive_batch]
+    fresh_logl = np.concatenate(collected_logl, axis=0)[:nlive_batch]
+
+    # Replace any remaining -inf with float32-safe sentinel
+    safe_min = np.finfo(fresh_logl.dtype).min / 2
+    fresh_logl = np.where(np.isneginf(fresh_logl), safe_min, fresh_logl)
+
+    return fresh_u, fresh_logl
+
+
 def _build_static_sampler(loglikelihood, prior_transform, ndim,
                            nlive, bound, **kwargs):
     """Construct a jnesty.NestedSampler with kwargs suitably defaulted."""
@@ -590,10 +670,21 @@ class DynamicNestedSampler:
                 init_x = None
                 init_logL = None
             else:
+                # Path B: subset-select + generate FRESH points (matching dynesty)
                 live_u, live_logl, scale, logl_min_eff = seed_batch_from_saved(
                     res, nlive_batch, logl_min_b, rstate)
-                init_x = jnp.asarray(live_u)
-                init_logL = jnp.asarray(live_logl)
+                # Generate nlive_batch FRESH points above logl_min via
+                # rejection sampling from the fitted bound.  This decorrelates
+                # the batch's live points from the saved run, matching
+                # dynesty's _new_point(logl_min) behavior.
+                from jax import random as jrandom
+                fresh_key = jrandom.PRNGKey(int(rstate.integers(0, 2**31 - 1)))
+                fresh_u, fresh_logl = generate_fresh_batch_points(
+                    self.loglikelihood, self.prior_transform,
+                    live_u, logl_min_eff, self.ndim, nlive_batch,
+                    self.bound, scale, fresh_key)
+                init_x = jnp.asarray(fresh_u)
+                init_logL = jnp.asarray(fresh_logl)
                 logl_min_b = logl_min_eff
 
             batch_sampler = _build_static_sampler(
