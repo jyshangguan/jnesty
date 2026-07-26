@@ -1,356 +1,184 @@
 #!/usr/bin/env python
 """
-Demo 5: Dynamic Nested Sampling — JNesty vs dynesty quantitative comparison
+Demo 5: Dynamic Nested Sampling -- JNesty vs dynesty direct comparison.
 
-Runs the same 3-D correlated Gaussian likelihood with both JNesty and
-dynesty (same nlive, same bound, same dlogz, same maxbatch) and produces
-overlaid dyplot.runplot figures so the two implementations can be
-compared side-by-side (static case + dynamic 80/20 case).
+Same 3-D correlated Gaussian likelihood, same nlive/dlogz/maxbatch.
+Produces overlaid runplots (static + dynamic 80/20) and a quantitative
+comparison table against the analytic lnZ.
 
 Usage:
     python 05_dynamic_gaussian_jnesty.py [--nlive 500] [--maxbatch 4]
-
-Output:
-    Creates output_05_jnesty/ with:
-    - summary.json                    : quantitative comparison table
-    - runplot_static_jnesty_vs_dynesty.png  : overlaid static runplot
-    - runplot_dynamic_jnesty_vs_dynesty.png : overlaid dynamic runplot
 """
-
-import argparse
-import json
-import time
+import argparse, json, time
 from pathlib import Path
-
 import numpy as np
-
-import matplotlib
-matplotlib.use("Agg")
+import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
+from matplotlib.lines import Line2D
 from dynesty import plotting as dyplot
-from dynesty import NestedSampler as DynestyNestedSampler
-from dynesty import DynamicNestedSampler as DynestyDynamicNestedSampler
-from dynesty.utils import get_neff_from_logwt
-
-from jnesty import NestedSampler as JNestyNestedSampler
-from jnesty import DynamicNestedSampler as JNestyDynamicNestedSampler
-from jnesty.dynamic import kish_ess as jnesty_kish_ess  # noqa: F401
-
-# ============================================================================
-# Problem: 3-D correlated multivariate normal (matching dynesty docs)
-# ============================================================================
+from dynesty import NestedSampler as DynestyNS
+from dynesty import DynamicNestedSampler as DynestyDNS
+from jnesty import NestedSampler as JNestyNS
+from jnesty import DynamicNestedSampler as JNestyDNS
 
 NDIM = 3
-
-C_np = np.identity(NDIM)
-C_np[C_np == 0] = 0.95
+C_np = np.identity(NDIM); C_np[C_np == 0] = 0.95
 Cinv_np = np.linalg.inv(C_np)
-lnorm_np = -0.5 * (np.log(2 * np.pi) * NDIM + np.log(np.linalg.det(C_np)))
-
-# JAX-compatible version for JNesty
+LNORM = -0.5 * (np.log(2*np.pi)*NDIM + np.log(np.linalg.det(C_np)))
 import jax.numpy as jnp
-_Cinv = jnp.asarray(Cinv_np)
-_lnorm = float(lnorm_np)
+_Cinv = jnp.asarray(Cinv_np); _lnorm = float(LNORM)
+
+def loglike_j(x): return -0.5 * jnp.dot(x, jnp.dot(_Cinv, x)) + _lnorm
+def loglike_d(x): return -0.5 * np.dot(x, np.dot(Cinv_np, x)) + LNORM
+def ptform(u):   return 20.0 * u - 10.0
 
 
-def loglikelihood_jnesty(x):
-    """JAX-compatible 3-D correlated Gaussian."""
-    return -0.5 * jnp.dot(x, jnp.dot(_Cinv, x)) + _lnorm
+def safe_logzerr(results_or_res, nlive):
+    """Extract logZ error estimate robustly."""
+    info = results_or_res.get("information", results_or_res.get("h", 1.0))
+    info = np.asarray(info)
+    H = float(info.flat[-1] if info.ndim else info)
+    return float(np.sqrt(max(abs(H), 1e-30) / nlive))
 
 
-def loglikelihood_dynesty(x):
-    """Numpy 3-D correlated Gaussian (for dynesty)."""
-    return -0.5 * np.dot(x, np.dot(Cinv_np, x)) + lnorm_np
-
-
-def prior_transform(u):
-    return 20.0 * u - 10.0
-
-
-# ---- helpers ----------------------------------------------------------------
-
-def run_dynesty_static(nlive, dlogz, maxiter):
-    """Run dynesty static."""
-    print("\n  dynesty static ...")
-    t0 = time.time()
-    s = DynestyNestedSampler(loglikelihood_dynesty, prior_transform,
-                              ndim=NDIM, nlive=nlive, bound="single")
-    s.run_nested(dlogz=dlogz, maxiter=maxiter, print_progress=False)
-    rt = time.time() - t0
-    res = s.results
-    logz = float(res.logz[-1])
-    logzerr = float(res.logzerr[-1])
-    ess = get_neff_from_logwt(res.logwt)
-    print(f"    logZ={logz:.4f} +/- {logzerr:.4f}, ESS={ess:.0f}, "
-          f"niter={res.niter}, ncalls={res.ncall}, rt={rt:.1f}s")
-    return {
-        "sampler": "dynesty", "mode": "static",
-        "logZ": logz, "logZ_err": logzerr,
-        "ESS": float(ess), "niter": res.niter,
-        "ncall": int(res.ncall) if not hasattr(res.ncall, '__len__')
-                 else int(np.sum(res.ncall)),
-        "runtime": rt, "results": res,
-    }
-
-
-def run_jnesty_static(nlive, dlogz, maxiter):
-    """Run JNesty static."""
-    print("\n  jnesty static ...")
-    t0 = time.time()
-    s = JNestyNestedSampler(loglikelihood_jnesty, prior_transform,
-                             ndim=NDIM, nlive=nlive, bound="single",
-                             verbose=False)
-    s.run_nested(max_iterations=maxiter, delta_logZ_threshold=dlogz,
-                  print_progress=False)
-    rt = time.time() - t0
-    r = s.results
-    logz = float(r["logz"])
-    logzerr = float(r["logzerr"])
-    logwt = np.asarray(r["logwt"])
-    ess = get_neff_from_logwt(logwt)
-    print(f"    logZ={logz:.4f} +/- {logzerr:.4f}, ESS={ess:.0f}, "
-          f"niter={r['niter']}, rt={rt:.1f}s")
-    return {
-        "sampler": "jnesty", "mode": "static",
-        "logZ": logz, "logZ_err": logzerr,
-        "ESS": float(ess), "niter": r["niter"],
-        "ncall": None,
-        "runtime": rt, "results": s.to_dynesty_results(),
-    }
-
-
-def run_dynesty_dynamic(nlive, maxbatch, n_effective):
-    """Run dynesty dynamic (default 80/20)."""
-    print("\n  dynesty dynamic (80/20) ...")
-    t0 = time.time()
-    s = DynestyDynamicNestedSampler(loglikelihood_dynesty, prior_transform,
-                                     ndim=NDIM, nlive=nlive, bound="single")
-    s.run_nested(nlive_init=nlive, nlive_batch=nlive,
-                  maxbatch=maxbatch,
-                  n_effective=n_effective,
-                  print_progress=False)
-    rt = time.time() - t0
-    res = s.results
-    logz = float(res.logz[-1])
-    logzerr = float(res.logzerr[-1])
-    ess = get_neff_from_logwt(res.logwt)
-    ncall = int(res.ncall) if not hasattr(res.ncall, '__len__')             else int(np.sum(res.ncall))
-    print(f"    logZ={logz:.4f} +/- {logzerr:.4f}, ESS={ess:.0f}, "
-          f"niter={res.niter}, ncalls={ncall}, rt={rt:.1f}s")
-    return {
-        "sampler": "dynesty", "mode": "dynamic_80_20",
-        "logZ": logz, "logZ_err": logzerr,
-        "ESS": float(ess), "niter": res.niter,
-        "ncall": ncall,
-        "runtime": rt, "results": res,
-    }
-
-
-def run_jnesty_dynamic(nlive, maxbatch, n_effective):
-    """Run JNesty dynamic (80/20)."""
-    print("\n  jnesty dynamic (80/20) ...")
-    t0 = time.time()
-    s = JNestyDynamicNestedSampler(loglikelihood_jnesty, prior_transform,
-                                    ndim=NDIM, nlive=nlive, bound="single")
-    s.run_nested(nlive_init=nlive, nlive_batch=nlive,
-                  maxbatch=maxbatch,
-                  n_effective=n_effective,
-                  pfrac=0.8,
-                  use_stop=True,
-                  print_progress=False, seed=0)
-    rt = time.time() - t0
-    r = s.results
-    logz_traj = np.asarray(r["logz"])
-    logz = float(logz_traj[-1])
-    logwt = np.asarray(r["logwt"])
-    info = r.get("information", r.get("h"))
-    if info is not None:
-        info = float(np.asarray(info).flat[-1] if np.asarray(info).ndim
-                      else np.asarray(info))
-        logzerr = float(np.sqrt(max(abs(info), 1e-30) / nlive))
-    else:
-        logzerr = float('nan')
-    ess = get_neff_from_logwt(logwt)
-    nbatches = len(s.batch_nlive_log) - 1
-    print(f"    logZ={logz:.4f} +/- {logzerr:.4f}, ESS={ess:.0f}, "
-          f"niter={len(logwt)}, nbatches={nbatches}, rt={rt:.1f}s")
-    return {
-        "sampler": "jnesty", "mode": "dynamic_80_20",
-        "logZ": logz, "logZ_err": logzerr,
-        "ESS": float(ess), "niter": len(logwt),
-        "nbatches": nbatches,
-        "runtime": rt, "results": s.to_dynesty_results(),
-    }
-
-
-# ---- plots ----------------------------------------------------------------
-
-def plot_overlaid_runplot(res_a, res_b, label_a, label_b, color_a, color_b,
-                           lnz_truth, out_path, title):
-    """
-    Overlay two runs (a and b) on one dyplot.runplot figure.
-    """
-    fig, axes = dyplot.runplot(res_a, color=color_a,
-                                mark_final_live=False,
+def overlay_runplot(res_a, res_b, label_a, label_b, color_a, color_b,
+                     lnz_truth, out_path, title):
+    fig, axes = dyplot.runplot(res_a, color=color_a, mark_final_live=False,
                                 logplot=True)
-    # Clear the default labels dyplot adds; re-set our own
-    fig, axes = dyplot.runplot(res_b, color=color_b,
-                                logplot=True,
-                                lnz_truth=lnz_truth,
-                                truth_color="orange",
+    fig, axes = dyplot.runplot(res_b, color=color_b, logplot=True,
+                                lnz_truth=lnz_truth, truth_color="orange",
                                 fig=(fig, axes))
-    # Build manual legend
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], color=color_a, lw=2, label=label_a),
-        Line2D([0], [0], color=color_b, lw=2, label=label_b),
-        Line2D([0], [0], color="orange", lw=1, ls="--",
-               label=f"truth (lnZ={lnz_truth:.3f})"),
+    legend = [
+        Line2D([0],[0], color=color_a, lw=2, label=label_a),
+        Line2D([0],[0], color=color_b, lw=2, label=label_b),
+        Line2D([0],[0], color="orange", lw=1, ls="--",
+               label="truth (lnZ={:.3f})".format(lnz_truth)),
     ]
-    axes[0].legend(handles=legend_elements, fontsize=8, loc="best")
+    axes[0].legend(handles=legend, fontsize=8, loc="best")
     fig.suptitle(title, y=1.005, fontsize=11)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    return out_path
 
-
-# ---- main -------------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--nlive", type=int, default=500)
-    p.add_argument("--maxbatch", type=int, default=4)
-    p.add_argument("--dlogz", type=float, default=0.01)
-    p.add_argument("--maxiter", type=int, default=20000)
-    args = p.parse_args()
-
-    cfg = {
-        "nlive": args.nlive, "maxbatch": args.maxbatch,
-        "dlogz": args.dlogz, "maxiter": args.maxiter,
-        "ndim": NDIM, "analytic lnZ": round(NDIM * -np.log(20.0), 4),
-    }
-    print("Configuration:")
-    for k, v in cfg.items():
-        print(f"  {k}: {v}")
-
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--nlive", type=int, default=500)
+    ap.add_argument("--maxbatch", type=int, default=4)
+    ap.add_argument("--dlogz", type=float, default=0.01)
+    ap.add_argument("--maxiter", type=int, default=20000)
+    args = ap.parse_args()
     out = Path(__file__).resolve().parent / "output_05_jnesty"
     out.mkdir(exist_ok=True)
     lnz_truth = NDIM * -np.log(20.0)
-    n_effective = max(10000, NDIM * NDIM)
+    nlive, mb = args.nlive, args.maxbatch
 
-    # --- Static runs (JNesty + dynesty) ---
-    print("\n=== Static ===")
-    r_static_jnesty = run_jnesty_static(args.nlive, args.dlogz, args.maxiter)
-    r_static_dynesty = run_dynesty_static(args.nlive, args.dlogz, args.maxiter)
+    print("truth lnZ = {:.4f}  (nlive={}, maxbatch={})".format(lnz_truth, nlive, mb))
 
-    # --- Dynamic runs (JNesty + dynesty, both pfrac=0.8) ---
-    use_stop_dynesty = False
-    print(f"\n=== Dynamic 80/20 (maxbatch={args.maxbatch}) ===")
-    r_dyn_jnesty = run_jnesty_dynamic(args.nlive, args.maxbatch, n_effective)
-    r_dyn_dynesty = run_dynesty_dynamic(args.nlive, args.maxbatch, n_effective)
+    # --- static ---
+    print("dynesty static ...")
+    t0 = time.time()
+    dns = DynestyNS(loglike_d, ptform, ndim=NDIM, nlive=nlive, bound="single")
+    dns.run_nested(dlogz=args.dlogz, maxiter=args.maxiter, print_progress=False)
+    drs = dns.results
+    rt_ds = time.time() - t0
 
-    # --- Overlaid runplot: static ---
-    print("\nGenerating overlaid static runplot ...")
-    plot_overlaid_runplot(
-        r_static_dynesty["results"], r_static_jnesty["results"],
-        f"dynesty static (ESS={r_static_dynesty['ESS']:.0f})",
-        f"jneesty static (ESS={r_static_jnesty['ESS']:.0f})",
-        "black", "red",
-        lnz_truth,
-        out / "runplot_static_jnesty_vs_dynesty.png",
-        f"Static NS: dynesty (black) vs jnesty (red)  |  "
-        f"nlive={args.nlive}, dlogz={args.dlogz}",
-    )
+    print("jneesty static ...")
+    t0 = time.time()
+    jns = JNestyNS(loglike_j, ptform, ndim=NDIM, nlive=nlive, bound="single", verbose=False)
+    jns.run_nested(delta_logZ_threshold=args.dlogz, max_iterations=args.maxiter,
+                    print_progress=False)
+    jrs_dynres = jns.to_dynesty_results()
+    rt_js = time.time() - t0
 
-    # --- Overlaid runplot: dynamic ---
-    print("Generating overlaid dynamic runplot ...")
-    plot_overlaid_runplot(
-        r_dyn_dynesty["results"], r_dyn_jnesty["results"],
-        f"dynesty dyn 80/20 (ESS={r_dyn_dynesty['ESS']:.0f})",
-        f"jneesty dyn 80/20 (ESS={r_dyn_jnesty['ESS']:.0f})",
-        "black", "red",
-        lnz_truth,
-        out / "runplot_dynamic_jnesty_vs_dynesty.png",
-        f"Dynamic NS 80/20: dynesty (black) vs jnesty (red)  |  "
-        f"nlive={args.nlive}, maxbatch={args.maxbatch}",
-    )
+    # --- dynamic ---
+    print("dynesty dynamic 80/20 ...")
+    t0 = time.time()
+    ddns = DynestyDNS(loglike_d, ptform, ndim=NDIM, nlive=nlive, bound="single")
+    ddns.run_nested(nlive_init=nlive, nlive_batch=nlive, maxbatch=mb,
+                     n_effective=10009, print_progress=False)
+    ddrs = ddns.results
+    rt_dd = time.time() - t0
 
-    # --- Quantitative comparison table ---
-    print("\n" + "=" * 80)
-    print("QUANTITATIVE COMPARISON")
-    print("=" * 80)
-    header = (f"{'Run':<30s} {'logZ':>8s} {'+/- err':>8s} "
-              f"{'Δ from truth':>12s} {'ESS':>8s} {'time':>8s}")
-    print(header)
-    print("-" * len(header))
-    entries = [r_static_dynesty, r_static_jnesty,
-               r_dyn_dynesty, r_dyn_jnesty]
+    print("jneesty dynamic 80/20 ...")
+    t0 = time.time()
+    jdns = JNestyDNS(loglike_j, ptform, ndim=NDIM, nlive=nlive, bound="single")
+    jdns.run_nested(nlive_init=nlive, nlive_batch=nlive, maxbatch=mb,
+                     pfrac=0.8, n_effective=10009, use_stop=True,
+                     print_progress=False, seed=0)
+    jdrs_dynres = jdns.to_dynesty_results()
+    rt_jd = time.time() - t0
+
+    # --- extract metrics ---
+    from dynesty.utils import get_neff_from_logwt
+    jns_res = jns.results
+    jdns_res = jdns.results
+    rows = [
+        ("dynesty static",       drs,       rt_ds, float(drs.logzerr[-1])),
+        ("jneesty static",       jrs_dynres, rt_js,
+         safe_logzerr(jns_res, nlive)),
+        ("dynesty dynamic 80/20", ddrs,      rt_dd, float(ddrs.logzerr[-1])),
+        ("jneesty dynamic 80/20", jdrs_dynres, rt_jd,
+         safe_logzerr(jdns_res, nlive)),
+    ]
+    entries = []
+    for label, res, rt, le in rows:
+        lz = float(np.asarray(res.logz).flat[-1])
+        ess = float(get_neff_from_logwt(res.logwt))
+        niter = int(res.niter)
+        delta = lz - lnz_truth
+        entries.append(dict(label=label, logZ=lz, logZ_err=le, ESS=ess,
+                             niter=niter, runtime=rt, delta=delta))
+
+    # --- report ---
+    print()
+    hdr = "{:<25s} {:>8s}  {:>8s}  {:>8s}  {:>8s}  {:>7s}  {:>7s}".format(
+           "Run", "logZ", "+/- err", "Delta", "ESS", "niter", "time")
+    print(hdr)
+    print("-" * len(hdr))
     for e in entries:
-        delta = e["logZ"] - lnz_truth
-        label = f"{e['sampler']} {e['mode']}"
-        print(f"{label:<30s} {e['logZ']:8.4f} {e['logZ_err']:8.4f} "
-              f"{delta:12.4f} {e['ESS']:8.0f} {e['runtime']:7.1f}s")
+        print("{:<25s} {:>8.4f}  {:>8.4f}  {:+8.4f}  {:>8.0f}  {:>7d}  {:>6.1f}s".format(
+              e["label"], e["logZ"], e["logZ_err"], e["delta"], e["ESS"],
+              e["niter"], e["runtime"]))
 
-    print(f"\n  truth lnZ = {lnz_truth:.4f}")
+    # --- gates ---
+    print()
+    g = entries
+    dz_static = abs(g[1]["logZ"] - g[0]["logZ"])
+    sig_static = np.sqrt(g[1]["logZ_err"]**2 + g[0]["logZ_err"]**2)
+    st = "PASS" if dz_static < 3*sig_static else "FAIL"
+    print("static   JNE vs DYN:  Delta={:.3f}, 3sigma={:.3f}  [{}]".format(dz_static, 3*sig_static, st))
 
-    # --- Pass/fail gates ---
-    print("\n--- Statistical consistency gates ---")
-    all_pass = True
-    gates = []
+    dz_dyn = abs(g[3]["logZ"] - g[2]["logZ"])
+    sig_dyn = np.sqrt(g[3]["logZ_err"]**2 + g[2]["logZ_err"]**2)
+    dt = "PASS" if dz_dyn < 3*sig_dyn else "FAIL"
+    print("dynamic  JNE vs DYN:  Delta={:.3f}, 3sigma={:.3f}  [{}]".format(dz_dyn, 3*sig_dyn, dt))
 
-    # Gate 1: static logZ agreement
-    dz_static = abs(r_static_jnesty["logZ"] - r_static_dynesty["logZ"])
-    err_static = np.sqrt(r_static_jnesty["logZ_err"]**2
-                         + r_static_dynesty["logZ_err"]**2)
-    g1 = dz_static < 3 * err_static
-    all_pass &= g1
-    gates.append(("static JNesty vs dynesty logZ agree (3σ)",
-                  g1, f"Δ={dz_static:.4f}, 3σ={3*err_static:.4f}"))
+    nsigma = abs(g[3]["delta"]) / max(g[3]["logZ_err"], 1e-30)
+    jt = "PASS" if nsigma < 3 else "FAIL"
+    print("JNE dyn vs truth:     Delta={:+.3f}, sigma={:.3f}, {:.1f}sigma  [{}]".format(
+          g[3]["delta"], g[3]["logZ_err"], nsigma, jt))
 
-    # Gate 2: dynamic logZ agreement
-    dz_dyn = abs(r_dyn_jnesty["logZ"] - r_dyn_dynesty["logZ"])
-    err_dyn = np.sqrt(r_dyn_jnesty["logZ_err"]**2
-                      + r_dyn_dynesty["logZ_err"]**2)
-    g2 = dz_dyn < 3 * err_dyn
-    all_pass &= g2
-    gates.append(("dynamic JNesty vs dynesty logZ agree (3σ)",
-                  g2, f"Δ={dz_dyn:.4f}, 3σ={3*err_dyn:.4f}"))
+    # --- plots ---
+    print()
+    print("Plotting ...")
+    overlay_runplot(
+        drs, jrs_dynres,
+        "dynesty static (ESS={:.0f})".format(g[0]["ESS"]),
+        "jneesty static (ESS={:.0f})".format(g[1]["ESS"]),
+        "black", "red", lnz_truth,
+        out / "runplot_static_jnesty_vs_dynesty.png",
+        "Static NS: dynesty (black) vs jnesty (red)  |  nlive={} dlogz={}".format(nlive, args.dlogz))
+    overlay_runplot(
+        ddrs, jdrs_dynres,
+        "dynesty dyn 80/20 (ESS={:.0f})".format(g[2]["ESS"]),
+        "jneesty dyn 80/20 (ESS={:.0f})".format(g[3]["ESS"]),
+        "black", "red", lnz_truth,
+        out / "runplot_dynamic_jnesty_vs_dynesty.png",
+        "Dynamic NS 80/20: dynesty (black) vs jnesty (red)  |  nlive={} maxbatch={}".format(nlive, mb))
 
-    # Gate 3: ESS ratio
-    if r_static_dynesty["ESS"] > 0:
-        ess_ratio = r_static_jnesty["ESS"] / r_static_dynesty["ESS"]
-        g3 = 0.3 < ess_ratio < 3.0
-        all_pass &= g3
-        gates.append(("static ESS ratio (JNesty/dynesty) in [0.3, 3.0]",
-                      g3, f"ratio={ess_ratio:.2f}"))
-
-    # Gate 4: static |logZ - truth|
-    g4 = abs(r_static_jnesty["logZ"] - lnz_truth) < 5 * r_static_jnesty["logZ_err"]
-    all_pass &= g4
-    gates.append(("static JNesty logZ within 5σ of truth",
-                  g4, f"Δ={abs(r_static_jnesty['logZ']-lnz_truth):.4f}, "
-                  f"5σ={5*r_static_jnesty['logZ_err']:.4f}"))
-
-    for name, ok, detail in gates:
-        print(f"  [{('PASS' if ok else 'FAIL'):>4s}] {name}")
-        if not ok or True:
-            print(f"         {detail}")
-
-    print(f"\n=== VERDICT: {'PASS' if all_pass else 'FAIL'} ===")
-
-    # --- Save summary ---
-    summary = {
-        "config": cfg,
-        "lnz_truth": lnz_truth,
-        "runs": entries,
-        "gates": [{"name": n, "pass": ok, "detail": d} for n, ok, d in gates],
-        "verdict": "PASS" if all_pass else "FAIL",
-    }
-    (out / "summary.json").write_text(
-        json.dumps(summary, indent=2, default=str))
-    print(f"\nOutput: {out}/")
+    (out / "summary.json").write_text(json.dumps(entries, indent=2))
+    print("Done. Output in {}".format(out))
     print("  - runplot_static_jnesty_vs_dynesty.png")
     print("  - runplot_dynamic_jnesty_vs_dynesty.png")
     print("  - summary.json")
