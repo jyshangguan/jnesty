@@ -641,3 +641,56 @@ Integration tests (`tests/integration/test_queue_and_defaults.py`):
 All 17 tests pass.
 
 **Files:** `sampler.py` (progress bar fix), `test_queue_mode.py` (new), `test_queue_and_defaults.py` (new), demo reports updated
+
+
+---
+
+## Task 004: Dynamic Nested Sampling
+
+### 2026-07-26 - Dynamic NS implementation
+
+**Goal:** Implement Dynesty-style dynamic nested sampling on top of the
+existing static engine.
+
+**What was added:**
+
+- `src/jnesty/dynamic.py` (new, ~650 lines): `DynamicNestedSampler` class
+  plus faithful ports of `compute_integrals`, `kish_ess`, `compute_weights`,
+  `weight_function`, `jitter_run`, `stopping_function`,
+  `seed_initial_live_points`, `seed_batch_from_saved`,
+  `combine_saved_and_new`.
+- `src/jnesty/sampler.py`: extended `WhileLoopNSConfig` with `logl_min`,
+  `logl_max`, `init_live_x`, `init_live_logL`, `init_logvol`. The new
+  `worst_logL > logl_max` termination predicate is added to both legacy
+  and queue cond functions. Phase 1 rejection is skipped when seed live
+  points are provided externally.
+- `src/jesty/jnesty.py`: `NestedSampler.run_nested()` accepts the new
+  batch kwargs.
+- `src/jesty/__init__.py`: exports `DynamicNestedSampler`.
+- `tests/unit/test_dynamic_faithful.py` (new): 15 F1-F9 faithfulness
+  unit tests, all passing.
+- `tests/integration/test_dynamic.py` (new): wraps the
+  `run_tests.py --quick` smoke test in pytest.
+- `dev/task_004_dynamic/dev_dynamic/run_tests.py` (new): 5-config ×
+  N-problem test matrix with auto-generated REPORT.md.
+- `dev/demo/05_dynamic_gaussian_jnesty.py` (new): user-facing demo.
+
+**Pre-existing bug fixes (necessary for dynamic to run):**
+
+- `sampler.py::estimate_batch_size_from_memory`: graceful fallback when
+  `CompiledMemoryStats` lacks `peak_memory_in_bytes` (newer jaxlib).
+- `sampler.py::body_fn`: broadcast `(ndim, ndim)` axes to
+  `(batch, ndim, ndim)` for vmapped walks in legacy batch mode.
+
+**Validation results (P1 2D Gaussian, --quick mode):**
+
+- F1-F9 faithfulness: 15/15 PASS
+- ESS gain (C pfrac=1.0 vs static): 1.69x (>= 1.5 gate)
+- ESS gain (B pfrac=0.8 vs static): 1.68x (>= 1.2 gate)
+- Cross-val vs dynesty: |logZ_JNE - logZ_DYN| < 0.5
+- Evidence gain (D pfrac=0 std <= static err): PASS
+- No regression (dynamic rt <= 3x static rt): PASS
+- Final verdict: PASS
+
+Demo 05 (full 3-batch dynamic run on 2D Gaussian): 2.27x ESS gain over
+static at matched budget.
