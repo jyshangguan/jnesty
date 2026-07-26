@@ -60,5 +60,5 @@ fig, axes = plotting.cornerplot(r)
 ## Next Steps
 
 - {doc}`methods` — How the sampling and bounding algorithms work
-- {doc}`examples` — Four worked examples (multi-modal, Rosenbrock, high-D, shells)
+- {doc}`examples` — Five worked examples (multi-modal, Rosenbrock, high-D, shells, dynamic)
 - {doc}`api` — Full API reference

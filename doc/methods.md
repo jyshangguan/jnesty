@@ -147,3 +147,61 @@ After sampling completes, `format_results()` computes posterior weights:
 
 The evidence error is estimated as $\sigma_{\log Z} = \sqrt{|H| / n_{\text{live}}}$
 where $H$ is the information.
+
+## Dynamic Nested Sampling
+
+JNesty implements dynamic nested sampling following
+[Higson et al. (2019)](https://doi.org/10.1007/s11222-018-9844-0) and
+[dynesty](https://dynesty.readthedocs.io/en/latest/dynamic.html). The
+key idea is to run a baseline static NS survey, then iteratively add
+**batches** of live points targeted at the regions that contribute most
+to posterior or evidence uncertainty.
+
+### Algorithm
+
+1. **Base run**: A standard static NS run with `nlive_init` live points
+   produces the initial set of dead points.
+
+2. **Batch loop** (repeated until `stopping_function` returns `True` or
+   `maxbatch` is reached):
+   - **Weight function**: computes where additional samples would be
+     most valuable, returning `(logl_min, logl_max)` bounds based on a
+     weighted combination of posterior and evidence importance:
+     $$w_i = p_{\text{frac}} \cdot p_i + (1 - p_{\text{frac}}) \cdot z_i$$
+   - **Seed live points**: volume-weighted subset selection from saved
+     dead points above `logl_min`, then **fresh point generation** via
+     rejection sampling to produce `nlive_batch` independent live points.
+   - **Batch run**: constrained static NS between `(logl_min, logl_max)`
+     with pre-loaded saved history for correct convergence.
+   - **Combine**: merge batch dead points into the saved run, recompute
+     `logvol` with combined live-point counts, and recalculate evidence
+     via `compute_integrals`.
+
+3. **Stopping**: the run stops when
+   $$\text{stop} = p_{\text{frac}} \cdot \frac{n_{\text{target}}}{n_{\text{eff}}}
+   + (1 - p_{\text{frac}}) \cdot \frac{\sigma_{\log Z}}{\text{evid\_thresh}} \leq 1$$
+
+### GPU Acceleration
+
+The fresh point generation step uses a **single-shot GPU batch**: samples
+`nlive_batch * 8` points from the unit cube, evaluates `logL` via a
+JIT-compiled `vmap`, and filters above `logl_min` — all in one JAX
+dispatch. The compiled `logL` evaluator is cached across batches.
+
+### API
+
+```python
+from jnesty import DynamicNestedSampler
+
+dsampler = DynamicNestedSampler(loglikelihood, prior_transform, ndim,
+                                 nlive=500, bound='single')
+dsampler.run_nested(nlive_init=500, nlive_batch=500, maxbatch=10,
+                     pfrac=0.8, n_effective=10000)
+```
+
+Key parameters:
+- `pfrac`: posterior/evidence split (0.8 default; 1.0 = posterior-only;
+  0.0 = evidence-only)
+- `nlive_batch`: live points per batch (default = `nlive`)
+- `maxbatch`: maximum number of batches
+- `n_effective`: target effective sample size for stopping
