@@ -359,10 +359,9 @@ def run_nested_sampling(
     # === PHASE 1: Uniform rejection sampling ===
     # Skip when seed live points were provided externally (dynamic-batch mode).
     if config.init_live_x is not None and config.init_live_logL is not None:
-        phase1_iters = 0
+        phase1_iters = config.init_iter_offset
         phase1_total_calls = nlive  # accounted for by the caller that seeded
         phase1_eff = 0.0
-        phase1_iters = config.init_iter_offset
         converged_phase1 = float(delta_logZ) < delta_logZ_threshold
     else:
         phase1_result = _run_uniform_phase(
@@ -625,11 +624,11 @@ def run_nested_sampling(
             live_x_new = live_x.at[worst_idx].set(x_new)
             live_logL_new = live_logL.at[worst_idx].set(logL_new)
 
-            # 7. Update evidence (supports pre-loaded history via config)
+            # 7. Update evidence (exact formula, supports pre-loaded history)
+            _dlv = jnp.log((nlive + 1.0) / nlive)  # dynesty exact formula
             _init_logX = jnp.asarray(config.init_logX, dtype=buf_dtype)
-            _iter_off = config.init_iter_offset
-            logX_old = _init_logX - (iteration - _iter_off) / nlive
-            logX_new_val = _init_logX - (iteration - _iter_off + 1) / nlive
+            logX_old = _init_logX - (iteration - config.init_iter_offset) * _dlv
+            logX_new_val = _init_logX - (iteration - config.init_iter_offset + 1) * _dlv
             log_dX = logsubexp(logX_old, logX_new_val)
             log_dZ = worst_logL + log_dX
             logZ_new = jnp.logaddexp(state[6], log_dZ)
@@ -751,11 +750,11 @@ def run_nested_sampling(
                 new_hist_total = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), hist_total)
                 final_head = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), new_head)
 
-                # 8. Evidence update (only when valid, supports pre-loaded history)
+                # 8. Evidence update (exact formula, supports pre-loaded history)
+                _dlv_q = jnp.log((nlive + 1.0) / nlive)  # dynesty exact formula
                 _init_logX_q = jnp.asarray(config.init_logX, dtype=buf_dtype)
-                _iter_off_q = config.init_iter_offset
-                logX_old = _init_logX_q - (iteration - _iter_off_q) / nlive
-                logX_new_val = _init_logX_q - (iteration - _iter_off_q + 1) / nlive
+                logX_old = _init_logX_q - (iteration - config.init_iter_offset) * _dlv_q
+                logX_new_val = _init_logX_q - (iteration - config.init_iter_offset + 1) * _dlv_q
                 log_dX = logsubexp(logX_old, logX_new_val)
                 log_dZ = worst_logL + log_dX
                 logZ_new = jnp.where(valid, jnp.logaddexp(state[6], log_dZ), state[6])

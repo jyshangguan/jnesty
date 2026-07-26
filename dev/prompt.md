@@ -120,4 +120,4 @@ I think the result plot is different from the dynesty website. I suggest you to 
 
 Good. However, please compare the sample results in more detail. I think the live point history as the function of -lnX (the first panel of the runplot) is very different for dynesty and JNesty for dynamic sampling. The other curves are also noticibly different. The static sampling also show some difference. Please check and try to find the problem.
 
-The stop criteria seem also different as JNesty sampled much longer to high -lnX.
+The results are still quite different. Please investigate the dynesty code for the dynamic sampler part and explain the algorithm step by step. Then, compare your current implementation in JNesty. Make point-to-point comparison and explain the differences. In this way, let's see what may course the difference. Note that our goal is to get almost identical results.
