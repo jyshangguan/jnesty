@@ -423,35 +423,12 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
             nlive_n = 0.0
 
     logl_arr = np.asarray(merged['logl'], dtype=float)
-    # Store the source nlive alongside each merged point: use the original
-    # run's nlive rather than the sum.  When runs are interleaved above
-    # logl_min, the combined nlive is saved_n + batch_n — but each dead
-    # point was removed from *one* independent run, so the evidence
-    # compression should use that run's live-point count.
-    source_nlive = np.empty(ntot, dtype=float)
-    idx_s, idx_n = 0, 0
-    logl_s = float(saved_d['logl'][0]) if nsaved > 0 else np.inf
-    logl_n = float(new_d['logl'][0]) if nnew > 0 else np.inf
-    nlive_s = float(saved_d['n'][0]) if nsaved > 0 else 0.0
-    nlive_n = float(new_d['n'][0]) if nnew > 0 else 0.0
-    for t in range(ntot):
-        if logl_s <= logl_n:
-            source_nlive[t] = nlive_s
-            idx_s += 1
-        else:
-            source_nlive[t] = nlive_n
-            idx_n += 1
-        try:
-            logl_s = float(saved_d['logl'][idx_s])
-            nlive_s = float(saved_d['n'][idx_s])
-        except IndexError:
-            logl_s = np.inf; nlive_s = 0.0
-        try:
-            logl_n = float(new_d['logl'][idx_n])
-            nlive_n = float(new_d['n'][idx_n])
-        except IndexError:
-            logl_n = np.inf; nlive_n = 0.0
-    n_arr_int = source_nlive.astype(int)
+    nlive_merged_arr = np.asarray(merged['n'], dtype=float)
+    # Use combined nlive per merged point: this replicates dynesty's
+    # combine_runs logvol recompute.  Each merged dead point represents
+    # one step in the combined NS chain; the effective nlive at that step
+    # is the total number of live points from both contributing runs.
+    n_arr_int = nlive_merged_arr.astype(int)
 
     plateau_mode = False
     plateau_counter = 0

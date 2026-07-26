@@ -117,3 +117,7 @@ in `https://dynesty.readthedocs.io/en/latest/dynamic.html#`. Please try to use t
 ## Debug
 
 I think the result plot is different from the dynesty website. I suggest you to run the same sampling with dynesty and directly compare the results with JNesty. I want quantitative comparison and make sure that JNesty got essentially the same results as dynesty in the test example. As for the result plot, just over plot the sampling results of dynesty and JNesty for a static sampling case and a dynamic sampling case (with posterior/evidence split 80/20).
+
+Good. However, please compare the sample results in more detail. I think the live point history as the function of -lnX (the first panel of the runplot) is very different for dynesty and JNesty for dynamic sampling. The other curves are also noticibly different. The static sampling also show some difference. Please check and try to find the problem.
+
+The stop criteria seem also different as JNesty sampled much longer to high -lnX.
