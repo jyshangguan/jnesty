@@ -114,11 +114,20 @@ def estimate_batch_size_from_memory(
             print(f"WARNING: Memory probe failed ({e}). Falling back to batch_size=1.")
         return 1
 
-    ma = compiled.memory_analysis()
+    ma = compiled.memory_analysis() if hasattr(compiled, 'memory_analysis') else None
     if ma is None:
+        # memory_analysis() is unavailable in some jaxlib versions; fall back
         return requested_batch_size
 
-    peak = ma.peak_memory_in_bytes
+    # Different jaxlib versions expose different attrs; try both.
+    peak = getattr(ma, 'peak_memory_in_bytes', None)
+    if peak is None:
+        # fallback: temp + argument + output as a rough upper bound
+        peak = (getattr(ma, 'temp_size_in_bytes', 0)
+                + getattr(ma, 'argument_size_in_bytes', 0)
+                + getattr(ma, 'output_size_in_bytes', 0))
+        if peak <= 0:
+            return requested_batch_size
     per_walk = max(1, peak // trial_batch)
 
     available = int(stats['bytes_limit'] * memory_frac)
@@ -561,7 +570,12 @@ def run_nested_sampling(
                         ell_idx = random.choice(sk3, logvol, p=ell_probs)
                         ba = me_axes_state[ell_idx]
                 else:
-                    ba = _bound_axes
+                    # Broadcast (ndim, ndim) -> (batch, ndim, ndim) for vmapped walk
+                    if effective_batch_size > 1:
+                        ba = jnp.broadcast_to(_bound_axes,
+                            (effective_batch_size,) + _bound_axes.shape)
+                    else:
+                        ba = _bound_axes
 
                 x_cand, logL_cand, n_acc, n_tot = sampler_obj.sample(
                     wk, x_starts, worst_logL, loglikelihood_for_jit,

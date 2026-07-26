@@ -354,16 +354,22 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
     Faithful port of ``dynesty.dynamicsampler.combine_runs`` including the
     plateau-aware logvol recompute.
     """
-    keys_int = ['logl', 'n', 'scale']
+    keys_int = ['logl', 'scale']
     saved_d = {k: np.asarray(saved_results[k]) for k in keys_int}
+    saved_d['n'] = np.asarray(saved_results.get(
+        'n', saved_results.get('samples_n')))
     saved_d['u'] = np.asarray(saved_results.get(
         'samples_u', saved_results.get('u')))
     saved_d['batch'] = np.asarray(saved_results.get(
-        'batch', np.zeros(len(saved_d['logl']))))
+        'samples_batch', saved_results.get(
+            'batch', np.zeros(len(saved_d['logl'])))))
     new_d = {k: np.asarray(new_results[k]) for k in keys_int}
+    new_d['n'] = np.asarray(new_results.get(
+        'n', new_results.get('samples_n')))
     new_d['u'] = np.asarray(new_results.get('samples_u', new_results.get('u')))
     new_d['batch'] = np.asarray(new_results.get(
-        'batch', np.ones(len(new_d['logl']))))
+        'samples_batch', new_results.get(
+            'batch', np.ones(len(new_d['logl'])))))
 
     nsaved = len(saved_d['n'])
     nnew = len(new_d['n'])
@@ -440,16 +446,20 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
     logwt, logz, logzvar, h = compute_integrals(logl=logl_arr, logvol=logvol_arr)
     out = {
         'samples_u': np.asarray(merged['u']),
+        'u': np.asarray(merged['u']),
         'logl': logl_arr,
         'samples_n': nlive_arr,
+        'n': nlive_arr,
         'scale': np.asarray(merged['scale']),
         'samples_batch': np.asarray(merged['batch']),
+        'batch': np.asarray(merged['batch']),
         'logvol': logvol_arr,
         'logwt': logwt,
         'logz': logz,
         'logzvar': logzvar,
         'h': h,
         'logzerr': np.sqrt(np.maximum(logzvar, 0.0)),
+        'information': float(h[-1]) if hasattr(h, '__len__') else float(h),
     }
     return out
 
@@ -600,32 +610,67 @@ class DynamicNestedSampler:
 
     @staticmethod
     def _normalize_static_results(res, nlive, batch_idx):
-        """Ensure results dict has the dynamic fields needed downstream."""
+        """Convert a static-format Results dict into the dynamic-compatible form.
+
+        Static format_results() appends the remaining live points to the dead
+        points, producing arrays of length niter + nlive. For those tail points
+        samples_n decreases from (nlive-1) down to 0, matching dynesty's
+        add_live_points() semantics.
+        """
         res = dict(res)
-        niter = res.get('niter', len(res.get('logl', [])))
+        n_total = len(res['logl'])
+        niter = int(res.get('niter', n_total))
+        n_live_tail = n_total - niter  # usually == nlive
+
+        # Convert scalar logz to trajectory if needed
+        if 'logz_trajectory' in res and not hasattr(res.get('logz'), '__len__'):
+            res['logz'] = np.asarray(res['logz_trajectory'], dtype=float)
+        elif not hasattr(res.get('logz', None), '__len__'):
+            logwt = np.asarray(res['logwt'], dtype=float)
+            res['logz'] = np.logaddexp.accumulate(logwt)
+        res['logz'] = np.asarray(res['logz'], dtype=float)
+
+        # samples_n: nlive for the main loop; dynesty uses n=nlive-it for the
+        # tail (it=0..nlive-1) giving [nlive, nlive-1, ..., 1].
         if 'samples_n' not in res:
-            res['samples_n'] = np.full(niter, nlive, dtype=float)
+            samples_n = np.full(niter, nlive, dtype=float)
+            if n_live_tail > 0:
+                tail_len = n_live_tail
+                start = nlive
+                end = max(nlive - tail_len + 1, 1)
+                tail = np.arange(start, end - 1, -1, dtype=float)
+                if len(tail) < tail_len:
+                    tail = np.concatenate([tail, np.ones(tail_len - len(tail))])
+                samples_n = np.concatenate([samples_n, tail])
+            res['samples_n'] = samples_n
         if 'samples_batch' not in res:
-            res['samples_batch'] = np.full(niter, batch_idx, dtype=int)
+            res['samples_batch'] = np.full(n_total, batch_idx, dtype=int)
+        # scale history (extend to n_total if needed)
         if 'scale' not in res:
             traj = res.get('scale_trajectory', None)
-            if traj is None:
-                traj = np.ones(niter)
+            if traj is None or len(traj) < n_total:
+                traj = np.ones(n_total)
             res['scale'] = np.asarray(traj)
-        if 'n' not in res:
-            res['n'] = res['samples_n']
-        if 'u' not in res:
-            res['u'] = res.get('samples_u', None)
-        if 'batch' not in res:
-            res['batch'] = res['samples_batch']
-        # logzvar trajectory; NS var estimator: logzvar = |cumsum(dh * dlogvol)|
-        if 'logzvar' not in res:
+        # aliases used by combine_saved_and_new
+        res['n'] = res['samples_n']
+        res['u'] = np.asarray(res.get('samples_u', np.zeros((n_total, 1))))
+        res['batch'] = res['samples_batch']
+        # logzerr trajectory: dynesty stores per-iter variance
+        if 'logzerr_trajectory' in res and len(res['logzerr_trajectory']) == n_total:
+            logzerr_traj = np.asarray(res['logzerr_trajectory'], dtype=float)
+            res['logzerr'] = logzerr_traj
+            res['logzvar'] = logzerr_traj ** 2
+        elif 'logzerr' not in res or not hasattr(res['logzerr'], '__len__'):
             try:
                 _, _, logzvar_traj, _ = compute_integrals(
                     logl=res['logl'], logvol=res['logvol'])
                 res['logzvar'] = logzvar_traj
+                res['logzerr'] = np.sqrt(np.maximum(logzvar_traj, 0.0))
             except Exception:
-                res['logzvar'] = np.zeros(niter)
+                res['logzvar'] = np.zeros(n_total)
+                res['logzerr'] = np.zeros(n_total)
+        # also expose information as h for consistency with combine output
+        res.setdefault('h', np.asarray(res.get('information', 0.0)))
         return res
 
     def _build_results(self):
