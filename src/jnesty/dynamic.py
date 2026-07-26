@@ -46,6 +46,10 @@ def compute_integrals(logl, logvol, reweight=None):
     """
     logl = np.asarray(logl, dtype=float)
     logvol = np.asarray(logvol, dtype=float)
+    # Replace -inf logl with dynesty's _LOWL_VAL sentinel to prevent
+    # compute_integrals from producing NaN (exp(0) * (-inf) = NaN).
+    _LOWL_VAL = -1.0e300
+    logl = np.where(np.isneginf(logl), _LOWL_VAL, logl)
     loglstar_pad = np.concatenate([[-1.0e300], logl])
 
     dlogvol = np.diff(logvol, prepend=0)
