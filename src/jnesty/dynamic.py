@@ -687,6 +687,39 @@ class DynamicNestedSampler:
             self._results = self._build_results()
         return self._results
 
+    def to_dynesty_results(self):
+        """Convert the dynamic results dict to a dynesty Results object.
+
+        Needed so dynesty.plotting.runplot/traceplot/cornerplot can be used
+        directly on JNesty dynamic output.
+        """
+        try:
+            from dynesty.utils import Results as DynestyResults
+        except ImportError:
+            raise ImportError("dynesty required. Install with: pip install dynesty")
+        r = self.results
+        if r is None:
+            raise RuntimeError("run_nested() has not been called yet")
+        n = len(r['logl'])
+        samples_u = np.asarray(r.get('samples_u', r.get('u', np.zeros((n, 1)))))
+        items = [
+            ('samples_u', samples_u),
+            ('samples_id', np.arange(n)),
+            ('logl', np.asarray(r['logl'], dtype=float)),
+            ('samples', samples_u),  # physical == unit cube for prior_ident; caller can override
+            ('samples_n', np.asarray(r['samples_n'], dtype=float)),
+            ('niter', n),
+            ('logwt', np.asarray(r['logwt'], dtype=float)),
+            ('logvol', np.asarray(r['logvol'], dtype=float)),
+            ('logz', np.asarray(r['logz'], dtype=float)),
+            ('logzerr', np.asarray(r['logzerr'], dtype=float)),
+            ('information', np.asarray(r['h'], dtype=float)),
+            ('batch_nlive', list(r.get('batch_nlive', []))),
+            ('batch_logl_bounds', list(r.get('batch_bounds', []))),
+            ('samples_batch', np.asarray(r['samples_batch'], dtype=int)),
+        ]
+        return DynestyResults(items)
+
     def print_summary(self):
         if self._results is None:
             print("[dynamic] no results yet")
