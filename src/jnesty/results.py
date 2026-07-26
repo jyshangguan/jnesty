@@ -128,9 +128,8 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
     n_calls = r.n_iterations * rwalk_K
     eff = 100.0 * r.n_iterations / n_calls if n_calls > 0 else 0.0
 
-    # Compute logvol for dead points: start from pre-load offset if batch mode
-    _ix = getattr(r, 'init_logX', 0.0) or 0.0
-    logvol_dead = _ix - (np.arange(n_dead) + 1) / nlive
+    # Compute logvol for dead points: logX_i = -(i+1)/nlive
+    logvol_dead = -(np.arange(n_dead) + 1) / nlive
 
     # Compute trapezoidal logwt for dead points
     logvol_padded = np.concatenate([[0.0], logvol_dead])
@@ -159,8 +158,8 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         live_samples_sorted = live_samples[sort_idx]
         live_x_sorted = live_x_np[sort_idx]
 
-        # Volume accounting for live points (respect pre-load offset)
-        logvol_last_dead = logvol_dead[-1] if n_dead > 0 else (_ix if _ix != 0 else 0.0)
+        # Volume accounting for live points
+        logvol_last_dead = logvol_dead[-1] if n_dead > 0 else 0.0
         logvol_live = np.log(1.0 - (np.arange(nlive) + 1.0) / (nlive + 1.0))
         logvol_live += logvol_last_dead
 
