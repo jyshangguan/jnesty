@@ -359,7 +359,7 @@ def run_nested_sampling(
     # === PHASE 1: Uniform rejection sampling ===
     # Skip when seed live points were provided externally (dynamic-batch mode).
     if config.init_live_x is not None and config.init_live_logL is not None:
-        phase1_iters = config.init_iter_offset
+        phase1_iters = 0  # Phase 1 did not run; pre-load offset handled separately
         phase1_total_calls = nlive  # accounted for by the caller that seeded
         phase1_eff = 0.0
         converged_phase1 = float(delta_logZ) < delta_logZ_threshold
@@ -494,7 +494,7 @@ def run_nested_sampling(
             scale_buffer,            # 5
             logZ,                    # 6
             delta_logZ,              # 7
-            jnp.array(phase1_iters, dtype=jnp.int32), # 8  iteration (includes pre-load offset)
+            jnp.array(phase1_iters + config.init_iter_offset, dtype=jnp.int32), # 8  iteration
             key,                     # 9  key
             current_scale,           # 10 scale
             jnp.array(0, dtype=jnp.int32),  # 11 hist_accept (accumulated, reset at bound update)
