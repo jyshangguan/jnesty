@@ -81,4 +81,11 @@ Please think carefully and provide me a plan.
 
 # Version
 
-Make the current version 0.1.0. Include this information in the package's __verssion__ as well as the doc.
+Make the current version 0.1.0. Include this information in the package's __version__ as well as the doc.
+
+
+# Implement the dynamic sampling
+
+The current JNesty code only have the basic nested sampling method. I want to implement the dynamic nesty sampling. Please investigate the dynesty doc and code, and understand what should be added in JNesty. JNesty should take the full advantage of the GPU acceleration. Please also check this page, https://dynesty.readthedocs.io/en/latest/dynamic.html, to design a clear test so that we can quantitatively check if the code is correctly implementedd. Please think carefully and make a plan. I want you to design a loop so that you can automatically make tests and check to confirm if the code works as expected.
+
+Please work in `/home/shangguan/Softwares/my_modules/JNesty/dev/task_004_dynamic` for this development. Please make a `dev_dynamic` for this task. Please read all the markdown files in `/home/shangguan/Softwares/my_modules/jnesty/dev` to understand the development strategy and keep the rules.

@@ -49,6 +49,12 @@ class WhileLoopNSConfig(NamedTuple):
     unit_cube_batch_size: int = 200  # batch size for uniform rejection phase
     min_eff: float = 10.0           # efficiency threshold to switch to rwalk (%)
     min_ncall: int = None           # min calls before switch (default 2*nlive)
+    # --- dynamic-NS extensions (defaults preserve static behaviour) ---
+    logl_min: float = -float('inf')   # lower logL bound (informational)
+    logl_max: float = float('inf')    # upper logL bound: terminate once worst_logL exceeds this
+    init_live_x: Optional[jnp.ndarray] = None       # (nlive, ndim) seed live points in unit cube
+    init_live_logL: Optional[jnp.ndarray] = None    # (nlive,) seed live logL values
+    init_logvol: float = 0.0          # starting log-volume (non-zero for path-A fallback)
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -300,10 +306,16 @@ def run_nested_sampling(
 
     start_time = time.time()
 
-    # Initialize live points from prior
-    keys = random.split(key, nlive + 1)
-    live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
-    live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
+    # Initialize live points: use provided seeds (dynamic-batch mode) or sample fresh
+    if config.init_live_x is not None and config.init_live_logL is not None:
+        live_x = jnp.asarray(config.init_live_x)
+        live_logL = jnp.asarray(config.init_live_logL)
+        keys = random.split(key, 1)
+        key = keys[0]
+    else:
+        keys = random.split(key, nlive + 1)
+        live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
+        live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
 
     # Pre-allocate buffers — use dtype matching the likelihood output
     buf_dtype = live_logL.dtype
@@ -319,38 +331,45 @@ def run_nested_sampling(
     )
 
     # === PHASE 1: Uniform rejection sampling ===
-    phase1_result = _run_uniform_phase(
-        loglikelihood_for_jit, live_x, live_logL,
-        worst_x_buffer, worst_logL_buffer,
-        delta_logZ_buffer, scale_buffer,
-        logZ, delta_logZ,
-        jnp.array(0),  # iteration offset
-        keys[-1],
-        nlive=nlive,
-        max_iterations=max_iterations,
-        delta_logZ_threshold=delta_logZ_threshold,
-        unit_cube_batch_size=config.unit_cube_batch_size,
-        min_eff=config.min_eff,
-        min_ncall=min_ncall,
-        ndim=ndim,
-    )
+    # Skip when seed live points were provided externally (dynamic-batch mode).
+    if config.init_live_x is not None and config.init_live_logL is not None:
+        phase1_iters = 0
+        phase1_total_calls = nlive  # accounted for by the caller that seeded
+        phase1_eff = 0.0
+        converged_phase1 = float(delta_logZ) < delta_logZ_threshold
+    else:
+        phase1_result = _run_uniform_phase(
+            loglikelihood_for_jit, live_x, live_logL,
+            worst_x_buffer, worst_logL_buffer,
+            delta_logZ_buffer, scale_buffer,
+            logZ, delta_logZ,
+            jnp.array(0),  # iteration offset
+            keys[-1],
+            nlive=nlive,
+            max_iterations=max_iterations,
+            delta_logZ_threshold=delta_logZ_threshold,
+            unit_cube_batch_size=config.unit_cube_batch_size,
+            min_eff=config.min_eff,
+            min_ncall=min_ncall,
+            ndim=ndim,
+        )
 
-    # Unpack Phase 1 results
-    live_x = phase1_result[0]
-    live_logL = phase1_result[1]
-    worst_x_buffer = phase1_result[2]
-    worst_logL_buffer = phase1_result[3]
-    delta_logZ_buffer = phase1_result[4]
-    scale_buffer = phase1_result[5]
-    logZ = phase1_result[6]
-    delta_logZ = phase1_result[7]
-    phase1_iters = int(phase1_result[8])
-    key = phase1_result[9]
+        # Unpack Phase 1 results
+        live_x = phase1_result[0]
+        live_logL = phase1_result[1]
+        worst_x_buffer = phase1_result[2]
+        worst_logL_buffer = phase1_result[3]
+        delta_logZ_buffer = phase1_result[4]
+        scale_buffer = phase1_result[5]
+        logZ = phase1_result[6]
+        delta_logZ = phase1_result[7]
+        phase1_iters = int(phase1_result[8])
+        key = phase1_result[9]
 
-    phase1_total_calls = int(phase1_result[11])
-    phase1_eff = (phase1_iters + nlive) * 100.0 / max(phase1_total_calls, 1)
+        phase1_total_calls = int(phase1_result[11])
+        phase1_eff = (phase1_iters + nlive) * 100.0 / max(phase1_total_calls, 1)
 
-    converged_phase1 = float(delta_logZ) < delta_logZ_threshold
+        converged_phase1 = float(delta_logZ) < delta_logZ_threshold
 
     # Update progress bar after Phase 1
     if pbar is not None:
@@ -468,10 +487,16 @@ def run_nested_sampling(
         else:
             init_state = _base_state
 
+        _logl_max = jnp.asarray(config.logl_max, dtype=buf_dtype)
+
         def cond_fn(state):
             dlz = state[7]
             it = state[8]
-            return (dlz >= delta_logZ_threshold) & (it < max_iterations)
+            # live_logL is state[1]; worst is its min; terminate if worst > logl_max
+            worst = jnp.min(state[1])
+            return ((dlz >= delta_logZ_threshold)
+                    & (it < max_iterations)
+                    & (worst < _logl_max))
 
         def body_fn(state):
             live_x = state[0]
@@ -612,13 +637,18 @@ def run_nested_sampling(
             _ncdim_q = config.ncdim if config.ncdim else ndim
 
             # cond_fn with safety limit on total calls
+            _logl_max_q = jnp.asarray(config.logl_max, dtype=buf_dtype)
             _max_calls_limit = max_iterations * rwalk_K * 20
 
             def cond_fn_q(state):
                 dlz = state[7]
                 it = state[8]
                 calls = state[17]
-                return (dlz >= delta_logZ_threshold) & (it < max_iterations) & (calls < _max_calls_limit)
+                worst = jnp.min(state[1])
+                return ((dlz >= delta_logZ_threshold)
+                        & (it < max_iterations)
+                        & (calls < _max_calls_limit)
+                        & (worst < _logl_max_q))
 
             def body_fn_q(state):
                 live_x = state[0]

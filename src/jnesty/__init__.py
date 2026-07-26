@@ -14,6 +14,7 @@ Example:
 __version__ = "0.1.0"
 
 from .jnesty import NestedSampler
+from .dynamic import DynamicNestedSampler
 from .sampler import run_nested_sampling, WhileLoopNSConfig, WhileLoopNSResult
 from .results import Results, save_results, load_results
 from . import plotting
@@ -28,6 +29,7 @@ diagnostics = plotting.diagnostics
 __all__ = [
     # Main API
     'NestedSampler',
+    'DynamicNestedSampler',
     'Results',
     'save_results',
     'load_results',
