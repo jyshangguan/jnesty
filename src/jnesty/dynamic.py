@@ -424,11 +424,36 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
 
     logl_arr = np.asarray(merged['logl'], dtype=float)
     nlive_merged_arr = np.asarray(merged['n'], dtype=float)
-    # Use combined nlive per merged point: this replicates dynesty's
-    # combine_runs logvol recompute.  Each merged dead point represents
-    # one step in the combined NS chain; the effective nlive at that step
-    # is the total number of live points from both contributing runs.
-    n_arr_int = nlive_merged_arr.astype(int)
+    # Use each merged point's source-run nlive for logvol decrement.
+    # The combined nlive approach (dynesty's combine_runs default) gives
+    # too little total compression when the batch contributes fewer points
+    # than expected, systematically overestimating evidence.  The source-run
+    # approach ensures each independent dead-point removal compresses at
+    # the correct run-local rate.
+    source_nlive = np.empty(ntot, dtype=float)
+    idx_s3, idx_n3 = 0, 0
+    logl_s3 = float(saved_d['logl'][0]) if nsaved > 0 else np.inf
+    logl_n3 = float(new_d['logl'][0]) if nnew > 0 else np.inf
+    nlive_s3 = float(saved_d['n'][0]) if nsaved > 0 else 0.0
+    nlive_n3 = float(new_d['n'][0]) if nnew > 0 else 0.0
+    for t in range(ntot):
+        if logl_s3 <= logl_n3:
+            source_nlive[t] = nlive_s3
+            idx_s3 += 1
+        else:
+            source_nlive[t] = nlive_n3
+            idx_n3 += 1
+        try:
+            logl_s3 = float(saved_d['logl'][idx_s3])
+            nlive_s3 = float(saved_d['n'][idx_s3])
+        except IndexError:
+            logl_s3 = np.inf; nlive_s3 = 0.0
+        try:
+            logl_n3 = float(new_d['logl'][idx_n3])
+            nlive_n3 = float(new_d['n'][idx_n3])
+        except IndexError:
+            logl_n3 = np.inf; nlive_n3 = 0.0
+    n_arr_int = source_nlive.astype(int)
 
     plateau_mode = False
     plateau_counter = 0

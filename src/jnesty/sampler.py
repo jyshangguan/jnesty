@@ -77,6 +77,8 @@ class WhileLoopNSResult(NamedTuple):
     acceptance_rate: float
     live_x: jnp.ndarray = None
     live_logL: jnp.ndarray = None
+    init_logX: float = 0.0          # pre-loaded logvol offset (batch mode)
+    init_iter_offset: int = 0       # pre-loaded iteration count (batch mode)
 
 
 def estimate_batch_size_from_memory(
@@ -1047,4 +1049,6 @@ def run_nested_sampling(
         acceptance_rate=acceptance_rate,
         live_x=live_x_final,
         live_logL=live_logL_final,
+        init_logX=config.init_logX,
+        init_iter_offset=config.init_iter_offset,
     )
