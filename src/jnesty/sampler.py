@@ -77,6 +77,7 @@ class WhileLoopNSResult(NamedTuple):
     acceptance_rate: float
     live_x: jnp.ndarray = None
     live_logL: jnp.ndarray = None
+    samples_u: jnp.ndarray = None   # dead-point unit-cube coords (before prior transform)
     init_logX: float = 0.0          # pre-loaded logvol offset (batch mode)
     init_iter_offset: int = 0       # pre-loaded iteration count (batch mode)
 
@@ -977,6 +978,9 @@ def run_nested_sampling(
     _off = config.init_iter_offset
     _n = actual_iterations
 
+    # Store unit-cube coords before transform
+    samples_u = worst_x_buffer[_off:_n]
+
     # Transform samples to physical space
     if prior_transform_fn is not None:
         samples = jnp.vectorize(prior_transform_fn, signature='(n)->(n)')(
@@ -1048,6 +1052,7 @@ def run_nested_sampling(
         acceptance_rate=acceptance_rate,
         live_x=live_x_final,
         live_logL=live_logL_final,
+        samples_u=samples_u,
         init_logX=config.init_logX,
         init_iter_offset=config.init_iter_offset,
     )
