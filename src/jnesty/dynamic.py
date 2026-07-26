@@ -46,10 +46,10 @@ def compute_integrals(logl, logvol, reweight=None):
     """
     logl = np.asarray(logl, dtype=float)
     logvol = np.asarray(logvol, dtype=float)
-    # Replace -inf logl with dynesty's _LOWL_VAL sentinel to prevent
+    # Replace -inf logl with float32-safe large negative value to prevent
     # compute_integrals from producing NaN (exp(0) * (-inf) = NaN).
-    _LOWL_VAL = -1.0e300
-    logl = np.where(np.isneginf(logl), _LOWL_VAL, logl)
+    safe_min = np.finfo(logl.dtype).min / 2 if hasattr(logl, 'dtype') else -3.4e38
+    logl = np.where(np.isneginf(logl), safe_min, logl)
     loglstar_pad = np.concatenate([[-1.0e300], logl])
 
     dlogvol = np.diff(logvol, prepend=0)
@@ -271,6 +271,7 @@ def seed_initial_live_points(prior_sample_fn, loglikelihood_fn, ndim, nlive, key
     min_npoints = min(nlive, max(ndim + 1, min(nlive - 20, 100)))
     live_u = np.zeros((nlive, ndim))
     live_logl = np.full(nlive, -np.inf)
+    _LOWL_VAL_SEED = -1.0e300
     ngood = 0
     iattempt = 0
     ncalls = 0
@@ -307,6 +308,9 @@ def seed_initial_live_points(prior_sample_fn, loglikelihood_fn, ndim, nlive, key
                     f"After {n_attempts} attempts no valid logL was found.")
             logvol_init = -np.log(iattempt)
             break
+    # Replace any remaining -inf logl with float32-safe large negative value
+    safe_min = np.finfo(live_logl.dtype).min / 2 if hasattr(live_logl, 'dtype') else -3.4e38
+    live_logl = np.where(np.isneginf(live_logl), safe_min, live_logl)
     return live_u, live_logl, logvol_init, ncalls
 
 
@@ -686,6 +690,12 @@ class DynamicNestedSampler:
         res['n'] = res['samples_n']
         res['u'] = np.asarray(res.get('samples_u', np.zeros((n_total, 1))))
         res['batch'] = res['samples_batch']
+        # Sanitize -inf logl values (float32-safe replacement)
+        if np.any(np.isneginf(np.asarray(res['logl']))):
+            logl_arr = np.asarray(res['logl'], dtype=float)
+            safe_min = np.finfo(logl_arr.dtype).min / 2
+            logl_arr = np.where(np.isneginf(logl_arr), safe_min, logl_arr)
+            res['logl'] = logl_arr
         # logzerr trajectory: dynesty stores per-iter variance
         if 'logzerr_trajectory' in res and len(res['logzerr_trajectory']) == n_total:
             logzerr_traj = np.asarray(res['logzerr_trajectory'], dtype=float)

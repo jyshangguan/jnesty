@@ -152,7 +152,11 @@ def _batch_logL_eval(loglikelihood_fn, live_x, batch_size=50):
     for i in range(0, nlive, batch_size):
         batch = live_x[i:i + batch_size]
         results.append(jnp.vectorize(loglikelihood_fn, signature='(n)->()')(batch))
-    return jnp.concatenate(results)
+    logL = jnp.concatenate(results)
+    # Replace -inf with a float32-safe large negative value
+    safe_min = jnp.finfo(logL.dtype).min / 2
+    logL = jnp.where(jnp.isneginf(logL), safe_min, logL)
+    return logL
 
 
 def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
@@ -325,6 +329,9 @@ def run_nested_sampling(
         keys = random.split(key, nlive + 1)
         live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
         live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
+        # Replace -inf logL with float32-safe large negative value
+        safe_min = jnp.finfo(live_logL.dtype).min / 2
+        live_logL = jnp.where(jnp.isneginf(live_logL), safe_min, live_logL)
 
     # Pre-allocate buffers — use dtype matching the likelihood output
     buf_dtype = live_logL.dtype

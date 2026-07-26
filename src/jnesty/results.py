@@ -191,6 +191,12 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         logzerr_trajectory = np.full(n_dead, r.logZ_error)
         n_total = n_dead
 
+    # Replace any lingering -inf logL values with dynesty's _LOWL_VAL
+    # so downstream integrals and plotting functions produce correct results.
+    # Replace -inf with a large negative float32-safe value
+    _LOWL_VAL = np.finfo(logL_all.dtype).min / 2 if hasattr(logL_all, 'dtype') else -1.0e300
+    logL_all = np.where(np.isneginf(logL_all), _LOWL_VAL, logL_all)
+
     results_dict = {
         # Evidence
         'logz': float(r.logZ),
