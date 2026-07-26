@@ -55,6 +55,11 @@ class WhileLoopNSConfig(NamedTuple):
     init_live_x: Optional[jnp.ndarray] = None       # (nlive, ndim) seed live points in unit cube
     init_live_logL: Optional[jnp.ndarray] = None    # (nlive,) seed live logL values
     init_logvol: float = 0.0          # starting log-volume (non-zero for path-A fallback)
+    # --- pre-loaded saved history (batch-convergence fix) ---
+    init_logZ_val: float = -float('inf')  # starting logZ (pre-loaded from saved run)
+    init_logX: float = 0.0               # starting log-vol (saved logvol at vol_idx)
+    init_ncall: int = 0                  # likelihood calls from pre-loaded history
+    init_iter_offset: int = 0            # iteration count from pre-loaded history
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -340,7 +345,10 @@ def run_nested_sampling(
     delta_logZ_buffer = jnp.full(max_iterations, jnp.inf, dtype=buf_dtype)
     scale_buffer = jnp.full(max_iterations, jnp.inf, dtype=buf_dtype)
 
-    logZ = jnp.array(-jnp.inf, dtype=buf_dtype)
+    if config.init_logZ_val > -1e300:
+        logZ = jnp.array(config.init_logZ_val, dtype=buf_dtype)
+    else:
+        logZ = jnp.array(-jnp.inf, dtype=buf_dtype)
     max_live_logL = jnp.max(live_logL)
     delta_logZ = jax.scipy.special.logsumexp(
         jnp.array([0.0, max_live_logL - logZ], dtype=buf_dtype)
@@ -352,6 +360,7 @@ def run_nested_sampling(
         phase1_iters = 0
         phase1_total_calls = nlive  # accounted for by the caller that seeded
         phase1_eff = 0.0
+        phase1_iters = config.init_iter_offset
         converged_phase1 = float(delta_logZ) < delta_logZ_threshold
     else:
         phase1_result = _run_uniform_phase(
@@ -484,7 +493,7 @@ def run_nested_sampling(
             scale_buffer,            # 5
             logZ,                    # 6
             delta_logZ,              # 7
-            jnp.array(phase1_iters, dtype=jnp.int32), # 8  iteration
+            jnp.array(phase1_iters, dtype=jnp.int32), # 8  iteration (includes pre-load offset)
             key,                     # 9  key
             current_scale,           # 10 scale
             jnp.array(0, dtype=jnp.int32),  # 11 hist_accept (accumulated, reset at bound update)
@@ -614,9 +623,11 @@ def run_nested_sampling(
             live_x_new = live_x.at[worst_idx].set(x_new)
             live_logL_new = live_logL.at[worst_idx].set(logL_new)
 
-            # 7. Update evidence
-            logX_old = -iteration / nlive
-            logX_new_val = -(iteration + 1) / nlive
+            # 7. Update evidence (supports pre-loaded history via config)
+            _init_logX = jnp.asarray(config.init_logX, dtype=buf_dtype)
+            _iter_off = config.init_iter_offset
+            logX_old = _init_logX - (iteration - _iter_off) / nlive
+            logX_new_val = _init_logX - (iteration - _iter_off + 1) / nlive
             log_dX = logsubexp(logX_old, logX_new_val)
             log_dZ = worst_logL + log_dX
             logZ_new = jnp.logaddexp(state[6], log_dZ)
@@ -738,9 +749,11 @@ def run_nested_sampling(
                 new_hist_total = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), hist_total)
                 final_head = jnp.where(queue_drained, jnp.array(0, dtype=jnp.int32), new_head)
 
-                # 8. Evidence update (only when valid)
-                logX_old = -iteration / nlive
-                logX_new_val = -(iteration + 1) / nlive
+                # 8. Evidence update (only when valid, supports pre-loaded history)
+                _init_logX_q = jnp.asarray(config.init_logX, dtype=buf_dtype)
+                _iter_off_q = config.init_iter_offset
+                logX_old = _init_logX_q - (iteration - _iter_off_q) / nlive
+                logX_new_val = _init_logX_q - (iteration - _iter_off_q + 1) / nlive
                 log_dX = logsubexp(logX_old, logX_new_val)
                 log_dZ = worst_logL + log_dX
                 logZ_new = jnp.where(valid, jnp.logaddexp(state[6], log_dZ), state[6])
@@ -959,17 +972,23 @@ def run_nested_sampling(
     runtime = time.time() - start_time
     actual_iterations = iteration_final
 
+    # Slice buffer entries, skipping pre-loaded history if any
+    _off = config.init_iter_offset
+    _n = actual_iterations
+
     # Transform samples to physical space
     if prior_transform_fn is not None:
         samples = jnp.vectorize(prior_transform_fn, signature='(n)->(n)')(
-            worst_x_buffer[:actual_iterations]
+            worst_x_buffer[_off:_n]
         )
     else:
-        samples = worst_x_buffer[:actual_iterations]
+        samples = worst_x_buffer[_off:_n]
 
-    logL_samples = worst_logL_buffer[:actual_iterations]
-    delta_logZ_trajectory = delta_logZ_buffer[:actual_iterations]
-    scale_trajectory = scale_buffer[:actual_iterations]
+    logL_samples = worst_logL_buffer[_off:_n]
+    delta_logZ_trajectory = delta_logZ_buffer[_off:_n]
+    scale_trajectory = scale_buffer[_off:_n]
+    # Adjust actual_iterations to exclude pre-loaded history
+    actual_iterations = _n - _off
     best_final_logL = jnp.max(live_logL_final)
 
     # Recalculate final logZ and H

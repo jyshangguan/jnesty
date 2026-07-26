@@ -600,6 +600,23 @@ class DynamicNestedSampler:
             batch_sampler = _build_static_sampler(
                 self.loglikelihood, self.prior_transform, self.ndim,
                 nlive=nlive_batch, bound=self.bound, **self.static_kwargs)
+            # Pre-load saved history below logl_min for correct convergence
+            init_logZ_val = -float('inf')
+            init_logX_val = 0.0
+            init_ncall_val = 0
+            init_iter_off = 0
+            if not np.isneginf(logl_min_b):
+                saved_logl = np.asarray(self.saved_run['logl'], dtype=float)
+                saved_logvol = np.asarray(self.saved_run['logvol'], dtype=float)
+                saved_logz = np.asarray(self.saved_run['logz'], dtype=float)
+                vol_idx = int(np.searchsorted(saved_logl, logl_min_b, side='right'))
+                vol_idx = min(vol_idx, len(saved_logl) - 1)
+                if vol_idx > 0:
+                    init_logZ_val = float(saved_logz[vol_idx - 1])
+                    init_logX_val = float(saved_logvol[vol_idx - 1])
+                    init_ncall_val = int(vol_idx * 25)  # approximate ncall from pre-loaded history
+                    init_iter_off = vol_idx
+
             batch_sampler.run_nested(
                 delta_logZ_threshold=dlogz_init,
                 print_progress=False,
@@ -607,6 +624,10 @@ class DynamicNestedSampler:
                 init_live_logL=init_logL,
                 logl_min=logl_min_b,
                 logl_max=logl_max_b,
+                init_logZ_val=init_logZ_val,
+                init_logX=init_logX_val,
+                init_ncall=init_ncall_val,
+                init_iter_offset=init_iter_off,
             )
             new_res = self._normalize_static_results(
                 batch_sampler.results, nlive_batch, n + 1)

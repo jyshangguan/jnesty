@@ -177,6 +177,10 @@ class NestedSampler:
         init_live_x=None,
         init_live_logL=None,
         init_logvol: float = 0.0,
+        init_logZ_val: float = -float('inf'),
+        init_logX: float = 0.0,
+        init_ncall: int = 0,
+        init_iter_offset: int = 0,
     ) -> None:
         """
         Run the nested sampling algorithm.
@@ -239,6 +243,10 @@ class NestedSampler:
             init_live_x=init_live_x,
             init_live_logL=init_live_logL,
             init_logvol=init_logvol,
+            init_logZ_val=init_logZ_val,
+            init_logX=init_logX,
+            init_ncall=init_ncall,
+            init_iter_offset=init_iter_offset,
         )
 
         key = random.PRNGKey(42)
