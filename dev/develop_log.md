@@ -694,3 +694,74 @@ existing static engine.
 
 Demo 05 (full 3-batch dynamic run on 2D Gaussian): 2.27x ESS gain over
 static at matched budget.
+
+
+---
+
+## Task 004: Dynamic NS — Phase 2 (convergence fixes + optimization)
+
+### 2026-07-26 - Evidence bias resolution + speed optimization
+
+After the initial implementation (Phase 1), the dynamic sampler showed
+a systematic ~0.3-0.5 evidence bias vs dynesty. Root causes identified
+and fixed through iterative debugging:
+
+**Fixes applied:**
+
+1. **Pre-loaded saved history** for batch convergence: thread
+   `init_logZ_val`, `init_logX`, `init_iter_offset` through
+   `WhileLoopNSConfig` → `run_nested_sampling`. Batch evidence starts
+   from saved run's state at `vol_idx`, not from scratch.
+
+2. **Exact evidence formula**: switched from linear `-i/nlive` to
+   dynesty's exact `dlv = log((nlive+1)/nlive)` in body_fn/q.
+
+3. **`-inf` logl → float32-safe sentinel**: `finfo(dtype).min/2`
+   (~-1.7e38 for float32) in 6 locations (sampler init, Phase 1/2
+   eval, dynamic seed/normalize, compute_integrals, format_results).
+
+4. **`samples_u` unit-cube fix**: pre-existing bug where dead-point
+   coordinates were stored in physical space (after prior_transform)
+   instead of unit-cube [0,1]. Fixed by adding `samples_u` field to
+   `WhileLoopNSResult`.
+
+5. **Combined-nlive logvol recompute**: `combine_saved_and_new` uses
+   combined nlive (matching dynesty's `combine_runs`) for smooth,
+   monotonic logvol trajectory.
+
+6. **Fresh point generation** (matching dynesty's `_new_point`):
+   After volume-weighted subset selection, generate `nlive_batch`
+   FRESH live points above `logl_min` via rejection sampling from
+   the unit cube. This decorrelates batch live points from the saved
+   run — the dominant cause of residual evidence bias.
+
+7. **Speed optimization**: single-shot GPU batch for fresh point
+   generation (62x speedup: 74s → 1.2s). JIT-compiled logL evaluator
+   cached on the DynamicNestedSampler instance.
+
+**Results (3-D correlated Gaussian, nlive=500, maxbatch=4):**
+
+| Metric | Value | Gate |
+|---|---|---|
+| JNE static vs DYN | Delta=0.075 | PASS (<3sigma) |
+| JNE dynamic vs DYN | Delta=0.043 | PASS (<3sigma) |
+| JNE dynamic vs truth | Delta=+0.21, 1.8sigma | PASS (<3sigma) |
+| Dynamic runtime | 23s (was 82s) | 3.5x speedup |
+| Static runtime | 4.2s | baseline |
+
+**Files changed:**
+- `src/jesty/sampler.py`: +init_logZ_val/init_logX/init_ncall/init_iter_offset
+  config fields, evidence formula, buffer slicing, samples_u field
+- `src/jesty/results.py`: float32-safe -inf sentinel, samples_u fix
+- `src/jesty/dynamic.py`: fresh point generation, combined-nlive combine,
+  JIT caching for speed
+- `src/jesty/jnesty.py`: forward new config kwargs
+- `dev/demo/05_dynamic_gaussian_jnesty.py`: dynesty comparison demo
+- `tests/unit/test_dynamic_faithful.py`: 15 F1-F9 faithfulness tests
+- `tests/integration/test_dynamic.py`: pytest wrapper
+
+**Algorithm comparison document:**
+`dev/task_004_dynamic/dev_dynamic/algorithm_analysis_v2.md` — step-by-step
+comparison of dynesty vs JNesty dynamic algorithms, identifying 6
+differences ranked by impact. The dominant fix was fresh point
+generation (difference #2 in the ranking).
