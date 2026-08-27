@@ -475,17 +475,95 @@ def combine_saved_and_new(saved_results, new_results, logl_min, logl_max):
     return out
 
 
-def generate_fresh_batch_points(loglikelihood_fn, prior_transform_fn,
-                                     subset_u, logl_min, ndim, nlive_batch,
-                                     bound_type, scale, key,
-                                     _compiled_logl=None):
-    """Generate nlive_batch fresh live points above logl_min in a single
-    GPU batch.  Matches dynesty's _new_point(logl_min) intent: independent
-    uniform samples from the constrained prior.
+def _batch_logL_eval_chunked(logl_fn, u, batch_size=50):
+    """Evaluate a vmapped log-likelihood in fixed-size chunks.
 
-    Single-shot design: sample nlive_batch*8 points from the unit cube,
-    evaluate logL in one vmap'd call, filter above logl_min, take first
-    nlive_batch.  No Python loop, single JIT dispatch.
+    Identical strategy to sampler._batch_logL_eval: never evaluates the whole
+    candidate batch at once, so peak GPU memory is bounded by batch_size
+    simultaneous forward models instead of len(u).
+    """
+    n = len(u)
+    if n <= batch_size:
+        return np.asarray(logl_fn(u))
+    results = []
+    for i in range(0, n, batch_size):
+        results.append(np.asarray(logl_fn(u[i:i + batch_size])))
+    return np.concatenate(results)
+
+
+def estimate_fresh_batch_size_from_memory(loglikelihood_fn, prior_transform_fn,
+                                          ndim, requested_batch_size=50,
+                                          memory_frac=0.9, verbose=True):
+    """Cap the fresh-point chunk size based on available GPU memory.
+
+    Identical strategy to sampler.estimate_batch_size_from_memory: compile a
+    small (2-point) trial vmap of the actual likelihood, read the per-point
+    peak memory from XLA's memory_analysis(), and cap the chunk so that it
+    fits within memory_frac of total GPU memory. Falls back to
+    requested_batch_size whenever probing is unavailable.
+    """
+    import jax
+
+    device = jax.devices()[0]
+    stats = device.memory_stats()
+    if stats is None:
+        return requested_batch_size
+
+    def loglike_wrapped(x):
+        return loglikelihood_fn(prior_transform_fn(x))
+
+    trial_u = jax.random.uniform(jax.random.PRNGKey(0), (2, ndim))
+    try:
+        trial_fn = jax.jit(jax.vmap(loglike_wrapped))
+        compiled = trial_fn.lower(trial_u).compile()
+    except Exception as e:
+        if verbose:
+            print(f"WARNING: memory probe failed ({e}). "
+                  f"Using fresh_batch_size={requested_batch_size}.")
+        return requested_batch_size
+
+    ma = compiled.memory_analysis() if hasattr(compiled, 'memory_analysis') else None
+    if ma is None:
+        # memory_analysis() unavailable in some jaxlib versions.
+        return requested_batch_size
+
+    peak = getattr(ma, 'peak_memory_in_bytes', None)
+    if peak is None:
+        # fallback: temp + argument + output as a rough upper bound
+        peak = (getattr(ma, 'temp_size_in_bytes', 0)
+                + getattr(ma, 'argument_size_in_bytes', 0)
+                + getattr(ma, 'output_size_in_bytes', 0))
+        if peak <= 0:
+            return requested_batch_size
+
+    per_point = max(1, peak // 2)  # trial used 2 points
+    available = int(stats['bytes_limit'] * memory_frac)
+    max_chunk = max(1, available // per_point)
+    capped = min(requested_batch_size, max_chunk)
+
+    if verbose and capped < requested_batch_size:
+        print(f"  Memory cap: fresh_batch_size {requested_batch_size} -> {capped} "
+              f"(per-point: {per_point / 1024:.0f} KB, "
+              f"budget: {available / (1024**2):.0f} MB, "
+              f"GPU: {stats['bytes_limit'] / (1024**3):.1f} GB)")
+
+    return capped
+
+
+def generate_fresh_batch_points(loglikelihood_fn, prior_transform_fn,
+                                subset_u, logl_min, ndim, nlive_batch,
+                                bound_type, scale, key,
+                                fresh_batch_size=50, _compiled_logl=None):
+    """Generate nlive_batch fresh live points above logl_min.
+
+    Matches dynesty's _new_point(logl_min) intent: independent uniform
+    samples from the constrained prior. Samples nlive_batch*8 candidate
+    points from the unit cube and keeps the first nlive_batch above
+    logl_min.
+
+    The candidate batch is evaluated in memory-bounded chunks (identical
+    strategy to the static sampler's _batch_logL_eval); the chunk size is
+    capped by estimate_fresh_batch_size_from_memory.
     """
     import jax
     import jax.numpy as jnp
@@ -500,7 +578,8 @@ def generate_fresh_batch_points(loglikelihood_fn, prior_transform_fn,
     n_sample = nlive_batch * 8
     sk, key = jax.random.split(key)
     cand_u = jax.random.uniform(sk, shape=(n_sample, ndim))
-    cand_logl = np.asarray(_compiled_logl(cand_u))
+    cand_logl = _batch_logL_eval_chunked(_compiled_logl, cand_u,
+                                         batch_size=fresh_batch_size)
     cand_u_np = np.asarray(cand_u)
 
     # Filter above logl_min
@@ -515,7 +594,8 @@ def generate_fresh_batch_points(loglikelihood_fn, prior_transform_fn,
         # Fallback: one more batch, then fill from subset
         sk2, key = jax.random.split(key)
         cand_u2 = jax.random.uniform(sk2, shape=(n_sample, ndim))
-        cand_logl2 = np.asarray(_compiled_logl(cand_u2))
+        cand_logl2 = _batch_logL_eval_chunked(_compiled_logl, cand_u2,
+                                              batch_size=fresh_batch_size)
         cand_u2_np = np.asarray(cand_u2)
         valid2 = cand_logl2 > float(logl_min)
         all_valid_u = np.concatenate([cand_u_np[valid], cand_u2_np[valid2]])
@@ -583,6 +663,7 @@ class DynamicNestedSampler:
                    dlogz_init=0.01,
                    nlive_batch=None,
                    maxbatch=100,
+                   max_iterations=100000,
                    pfrac=0.8,
                    maxfrac=0.8,
                    pad=1,
@@ -592,7 +673,12 @@ class DynamicNestedSampler:
                    use_stop=True,
                    print_progress=True,
                    seed=None):
-        """Run the dynamic nested sampling loop."""
+        """Run the dynamic nested sampling loop.
+
+        max_iterations is forwarded to every internal static sub-run (the base
+        run and each batch) as the per-run hard iteration cap; convergence is
+        controlled by dlogz_init.
+        """
         import jax.numpy as jnp
         from .results import format_results  # noqa: F401
 
@@ -610,6 +696,7 @@ class DynamicNestedSampler:
             self.loglikelihood, self.prior_transform, self.ndim,
             nlive=nlive_init, bound=self.bound, **self.static_kwargs)
         base_sampler.run_nested(
+            max_iterations=max_iterations,
             delta_logZ_threshold=dlogz_init,
             print_progress=False,
         )
@@ -617,6 +704,14 @@ class DynamicNestedSampler:
         self.saved_run = base_res
         self.batch_bounds_log = [(-np.inf, np.inf)]
         self.batch_nlive_log = [nlive_init]
+
+        # Memory-adaptive fresh-point chunk size (identical strategy to the
+        # static sampler's estimate_batch_size_from_memory).
+        memory_frac = self.static_kwargs.get('memory_frac', 0.9)
+        fresh_batch_size = estimate_fresh_batch_size_from_memory(
+            self.loglikelihood, self.prior_transform, self.ndim,
+            requested_batch_size=50, memory_frac=memory_frac,
+            verbose=print_progress)
 
         # === Batch loop ===
         wt_kwargs = {'pfrac': pfrac, 'maxfrac': maxfrac, 'pad': pad}
@@ -666,6 +761,7 @@ class DynamicNestedSampler:
                     self.loglikelihood, self.prior_transform,
                     live_u, logl_min_eff, self.ndim, nlive_batch,
                     self.bound, scale, fresh_key,
+                    fresh_batch_size=fresh_batch_size,
                     _compiled_logl=getattr(self, '_compiled_logl', None))
                 init_x = jnp.asarray(fresh_u)
                 init_logL = jnp.asarray(fresh_logl)
@@ -694,6 +790,7 @@ class DynamicNestedSampler:
             # Use a smaller dlogz for batches to run more iterations,
             # compensating for JNesty's different convergence behavior vs dynesty.
             batch_sampler.run_nested(
+                max_iterations=max_iterations,
                 delta_logZ_threshold=dlogz_init,
                 print_progress=False,
                 init_live_x=init_x,
