@@ -86,9 +86,15 @@ class NestedSampler:
         unit_cube_batch_size: int = 200,
         min_eff: float = 10.0,
         min_ncall: Optional[int] = None,
+        context=None,
     ):
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
+        #: Optional pytree passed to every traced function as an argument.
+        #: With it, ``loglikelihood(x, context)`` / ``prior_transform(u, context)``
+        #: carry the dataset, so the compiled kernels do not embed it and are
+        #: reused from one dataset to the next (see ``clear_compiled_units()``).
+        self.context = context
         self.ndim = ndim
         self.nlive = nlive
         self.target_acceptance = target_acceptance
@@ -257,6 +263,7 @@ class NestedSampler:
             config=config,
             key=key,
             prior_transform_fn=self.prior_transform,
+            context=self.context,
         )
 
         if self.verbose:
@@ -279,6 +286,7 @@ class NestedSampler:
             self._results = format_results(
                 self._raw_result, self.prior_transform, self.ndim,
                 self.nlive, self.rwalk_K, self._delta_logZ_threshold,
+                context=self.context,
             )
 
         return self._results

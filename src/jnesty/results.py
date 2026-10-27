@@ -10,6 +10,8 @@ import os
 import numpy as np
 from typing import Optional
 
+from .utils import call_with_context
+
 
 def _convert_to_numpy(arr):
     """Convert JAX arrays or other array-like to numpy."""
@@ -89,7 +91,7 @@ class Results:
 
 
 def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
-                   delta_logZ_threshold):
+                   delta_logZ_threshold, context=None):
     """
     Convert raw sampler output (WhileLoopNSResult) into a Results object.
 
@@ -150,7 +152,8 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         live_x_np = _convert_to_numpy(live_x)
 
         # Transform live points to physical space
-        live_samples = np.array([prior_transform(x) for x in live_x_np])
+        live_samples = np.array([call_with_context(prior_transform, x, context)
+                                 for x in live_x_np])
 
         # Sort live points by logL (ascending)
         sort_idx = np.argsort(live_logL_np)

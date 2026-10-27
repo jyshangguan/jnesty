@@ -11,6 +11,21 @@ from jax import random
 from jax.scipy.special import gammaln
 
 
+def call_with_context(fn, x, context):
+    """Invoke a user callable, appending the context only when one was given.
+
+    A sampler created with ``context=None`` calls ``fn(x)`` exactly as it always
+    has.  With a context, it calls ``fn(x, context)``, and -- crucially -- every
+    compiled function inside the sampler receives the context as an *argument*
+    rather than closing over it, so the traced program does not contain the
+    user's data and can be reused for the next dataset (see the ``context``
+    parameter of :class:`jnesty.NestedSampler`).
+    """
+    if context is None:
+        return fn(x)
+    return fn(x, context)
+
+
 def randsphere(key, n):
     """
     Draw a point uniformly within an n-dimensional unit ball.

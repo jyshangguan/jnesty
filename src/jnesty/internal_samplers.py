@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from jax import random, lax
 from typing import Optional
 
-from .utils import randsphere
+from .utils import call_with_context, randsphere
 
 
 def apply_reflect(u):
@@ -109,7 +109,7 @@ def _propose_one(key, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx):
 
 def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
                  axes, scale, n_steps, ndim, n_cluster, prior_bounds,
-                 walk_schedule):
+                 walk_schedule, context=None):
     """Run a single K-step random walk. Returns (x_final, n_accepted, n_total).
 
     Matches Dynesty's generic_random_walk (internal_samplers.py:866-987):
@@ -141,7 +141,7 @@ def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
         # data-dependent predicate inside lax.scan kills GPU kernel fusion).
         logL_proposed = jnp.where(
             in_bounds,
-            loglikelihood_fn(x_proposed),
+            call_with_context(loglikelihood_fn, x_proposed, context),
             -jnp.inf
         )
 
@@ -160,7 +160,8 @@ def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
 def vmap_queue_refill(refill_key, live_x, live_logL, loglstar,
                       loglikelihood_fn, me_axes, me_logvol_ells,
                       bound_axes, scale, rwalk_K, ndim, ncdim,
-                      queue_size, use_multi_ellipsoid, prior_bounds=None):
+                      queue_size, use_multi_ellipsoid, prior_bounds=None,
+                      context=None):
     """Generate queue_size candidate points in parallel via vmap.
 
     Each candidate is produced by a FULL rwalk_K-step random walk from a
@@ -208,9 +209,9 @@ def vmap_queue_refill(refill_key, live_x, live_logL, loglstar,
         x_new, n_acc, n_tot = _single_walk(
             k_walk, x_start, loglstar, loglikelihood_fn,
             axes, scale, rwalk_K, ndim, ncdim,
-            prior_bounds, None
+            prior_bounds, None, context
         )
-        logL_new = loglikelihood_fn(x_new)
+        logL_new = call_with_context(loglikelihood_fn, x_new, context)
         return x_new, logL_new, n_acc, n_tot
 
     return jax.vmap(_generate_one)(keys)
@@ -246,7 +247,7 @@ class RWalkSampler(InternalSampler):
 
     def sample(self, key, x_starts, logL_constraint, loglikelihood_fn,
                axes, scale, n_steps, prior_bounds=None,
-               walk_schedule=None):
+               walk_schedule=None, context=None):
         """
         K-step random walk using randsphere proposals.
 
@@ -271,7 +272,7 @@ class RWalkSampler(InternalSampler):
             x_new, n_accepted, n_total = _single_walk(
                 key, x_starts, logL_constraint, loglikelihood_fn,
                 axes, scale, n_steps, ndim, n_cluster,
-                prior_bounds, walk_schedule
+                prior_bounds, walk_schedule, context
             )
         else:
             # Parallel walks: B walks with n_steps // B steps each
@@ -283,14 +284,15 @@ class RWalkSampler(InternalSampler):
                 lambda wk, x0, ax: _single_walk(
                     wk, x0, logL_constraint, loglikelihood_fn,
                     ax, scale, steps_per_walk, ndim, n_cluster,
-                    prior_bounds, walk_schedule
+                    prior_bounds, walk_schedule, context
                 )
             )
             x_candidates, n_accepted_arr, n_total_arr = vmapped_walk(
                 walk_keys, x_starts, axes)
 
             # Evaluate likelihoods for all candidates
-            logL_candidates = jax.vmap(loglikelihood_fn)(x_candidates)
+            logL_candidates = jax.vmap(
+                lambda x: call_with_context(loglikelihood_fn, x, context))(x_candidates)
 
             # Check prior_bounds
             if prior_bounds is not None:
@@ -312,7 +314,7 @@ class RWalkSampler(InternalSampler):
             n_accepted = jnp.sum(n_accepted_arr).astype(jnp.int32)
             n_total = jnp.sum(n_total_arr).astype(jnp.int32)
 
-        logL_new = loglikelihood_fn(x_new)
+        logL_new = call_with_context(loglikelihood_fn, x_new, context)
         return x_new, logL_new, n_accepted, n_total
 
     def tune(self, scale, acceptance_rate, ndim, iteration):

@@ -8,7 +8,9 @@ Delegates point proposal to InternalSampler and bounding to Bound.
 Returns raw WhileLoopNSResult for formatting by results.py.
 """
 
+import hashlib
 import time
+from functools import partial
 from typing import Optional, NamedTuple
 
 import jax
@@ -16,7 +18,7 @@ import jax.numpy as jnp
 from jax import random, lax
 
 from .internal_samplers import RWalkSampler, _single_walk, vmap_queue_refill
-from .utils import logsubexp
+from .utils import call_with_context, logsubexp
 
 # Import for progress tracking
 try:
@@ -26,6 +28,57 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
     tqdm = None
+
+
+#: Compiled nested-sampling kernels, keyed by the *program* they compile.
+#: A run built with a ``context`` traces its likelihood with the data as an
+#: argument, so one kernel serves every dataset of the same structure; this
+#: dictionary is what lets the second run skip XLA entirely (JAX recompiles a
+#: fresh ``jax.jit`` object even when its program is identical).
+_COMPILED_UNITS = {}
+
+
+def clear_compiled_units():
+    """Drop every cached compiled kernel; returns how many were freed."""
+    count = len(_COMPILED_UNITS)
+    _COMPILED_UNITS.clear()
+    return count
+
+
+def compiled_units_size():
+    """Number of cached compiled kernels (diagnostic)."""
+    return len(_COMPILED_UNITS)
+
+
+def _program_key(fn, ndim, context):
+    """SHA-256 of the program ``fn`` traces to at a generic point."""
+    dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    example = jnp.zeros((ndim,), dtype=dtype)
+    program = (jax.make_jaxpr(fn)(example) if context is None
+               else jax.make_jaxpr(fn)(example, context))
+    return hashlib.sha256(str(program).encode("utf-8")).hexdigest()
+
+
+def _state_signature(state):
+    """Shapes and dtypes of a loop state, which the program depends on."""
+    leaves, _ = jax.tree_util.tree_flatten(state)
+    return tuple((tuple(getattr(leaf, "shape", ())), str(getattr(leaf, "dtype", "")))
+                 for leaf in leaves)
+
+
+def compiled_unit(kind, build, state, context, program_key, config_signature):
+    """Compile ``build`` once per program and reuse it for the next dataset.
+
+    ``build(state, context)`` must be a pure function of its arguments: the
+    context carries every array that changes from one dataset to the next, so
+    the same compiled kernel is valid for all of them.
+    """
+    key = (kind, program_key, config_signature, _state_signature(state))
+    compiled = _COMPILED_UNITS.get(key)
+    if compiled is None:
+        compiled = jax.jit(build)
+        _COMPILED_UNITS[key] = compiled
+    return compiled
 
 
 class WhileLoopNSConfig(NamedTuple):
@@ -84,7 +137,7 @@ class WhileLoopNSResult(NamedTuple):
 
 def estimate_batch_size_from_memory(
     loglikelihood_fn, live_x, bound_axes, ndim, rwalk_K,
-    requested_batch_size, memory_frac=0.9, verbose=True,
+    requested_batch_size, memory_frac=0.9, verbose=True, context=None,
 ):
     """
     Cap batch_size based on available GPU memory.
@@ -109,14 +162,26 @@ def estimate_batch_size_from_memory(
 
     try:
         trial_keys = random.split(random.PRNGKey(0), trial_batch)
+        # the starting point and the axes travel as arguments, not literals, so
+        # the probe's program does not change from one dataset to the next
+        trial_x = jnp.broadcast_to(x_start, (trial_batch,) + x_start.shape)
+        trial_axes = jnp.broadcast_to(bound_axes, (trial_batch,) + bound_axes.shape)
         trial_fn = jax.vmap(
-            lambda wk: _single_walk(
-                wk, x_start, jnp.array(-jnp.inf), loglikelihood_fn,
-                bound_axes, jnp.array(1.0), trial_steps, ndim, ndim,
-                None, None
+            lambda wk, x0, ax: _single_walk(
+                wk, x0, jnp.array(-jnp.inf), loglikelihood_fn,
+                ax, jnp.array(1.0), trial_steps, ndim, ndim,
+                None, None, context
             )
         )
-        compiled = jax.jit(trial_fn).lower(trial_keys).compile()
+        probe_key = ("memory_probe",
+                     _program_key(loglikelihood_fn, ndim, context)
+                     if context is not None else None,
+                     trial_steps, ndim, trial_x.shape, trial_axes.shape)
+        compiled = _COMPILED_UNITS.get(probe_key)
+        if compiled is None:
+            compiled = jax.jit(trial_fn).lower(trial_keys, trial_x, trial_axes).compile()
+            if context is not None:
+                _COMPILED_UNITS[probe_key] = compiled
     except Exception as e:
         if verbose:
             print(f"WARNING: Memory probe failed ({e}). Falling back to batch_size=1.")
@@ -151,15 +216,20 @@ def estimate_batch_size_from_memory(
     return capped
 
 
-def _batch_logL_eval(loglikelihood_fn, live_x, batch_size=50):
+def _batch_logL_eval(loglikelihood_fn, live_x, batch_size=50, context=None):
     """Evaluate logL for all live points in batches to avoid OOM."""
+    def _eval(points):
+        if context is None:
+            return jnp.vectorize(loglikelihood_fn, signature='(n)->()')(points)
+        return jax.vmap(lambda x: loglikelihood_fn(x, context))(points)
+
     nlive = live_x.shape[0]
     if nlive <= batch_size:
-        return jnp.vectorize(loglikelihood_fn, signature='(n)->()')(live_x)
+        return _eval(live_x)
     results = []
     for i in range(0, nlive, batch_size):
         batch = live_x[i:i + batch_size]
-        results.append(jnp.vectorize(loglikelihood_fn, signature='(n)->()')(batch))
+        results.append(_eval(batch))
     logL = jnp.concatenate(results)
     # Replace -inf with a float32-safe large negative value
     safe_min = jnp.finfo(logL.dtype).min / 2
@@ -171,7 +241,8 @@ def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
                        worst_logL_buffer, delta_logZ_buffer, scale_buffer,
                        logZ, delta_logZ, iteration_offset, key, nlive,
                        max_iterations, delta_logZ_threshold, unit_cube_batch_size,
-                       min_eff, min_ncall, ndim):
+                       min_eff, min_ncall, ndim, context=None,
+                       config_signature=None):
     """
     Phase 1: Uniform rejection sampling from the unit cube.
 
@@ -180,8 +251,6 @@ def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
 
     Returns updated state tuple ready for Phase 2 (rwalk).
     """
-    vmapped_loglike = jax.vmap(loglikelihood_fn)
-
     # Use consistent dtype matching the likelihood output
     dtype = live_logL.dtype
 
@@ -200,7 +269,7 @@ def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
         switch = (eff < min_eff) & (tot_calls >= min_ncall)
         return (~converged) & (~too_many) & (~switch)
 
-    def phase1_body(state):
+    def phase1_body(state, vmapped_loglike):
         live_x, live_logL, wx_buf, wl_buf, dlz_buf, sc_buf, \
             logZ, dlz, it, key, scale, tot_calls = state
 
@@ -261,10 +330,27 @@ def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
                    jnp.array(1.0, dtype=dtype),  # scale placeholder
                    init_total_calls)
 
-    phase1_fn = phase1_body
+    def _phase1(s, ctx):
+        if ctx is None:
+            vmapped_loglike = jax.vmap(loglikelihood_fn)
+        else:
+            # ctx arrives as a traced argument of this function, so the program
+            # does not contain the dataset and serves the next one too
+            vmapped_loglike = jax.vmap(lambda x: loglikelihood_fn(x, ctx))
 
-    compiled_phase1 = jax.jit(lambda s: lax.while_loop(phase1_cond, phase1_fn, s))
-    phase1_result = compiled_phase1(phase1_init)
+        def phase1_fn(state):
+            return phase1_body(state, vmapped_loglike)
+
+        return lax.while_loop(phase1_cond, phase1_fn, s)
+
+    if context is None:
+        compiled_phase1 = jax.jit(lambda s: _phase1(s, None))
+        phase1_result = compiled_phase1(phase1_init)
+    else:
+        compiled_phase1 = compiled_unit(
+            "phase1", _phase1, phase1_init, context,
+            _program_key(loglikelihood_fn, ndim, context), config_signature)
+        phase1_result = compiled_phase1(phase1_init, context)
 
     return phase1_result
 
@@ -276,6 +362,7 @@ def run_nested_sampling(
     config,
     key=None,
     prior_transform_fn=None,
+    context=None,
 ):
     """
     Run nested sampling with iteration-granular adaptive termination.
@@ -311,10 +398,16 @@ def run_nested_sampling(
     rwalk_K = config.rwalk_K
     min_ncall = config.min_ncall if config.min_ncall is not None else 2 * nlive
 
-    # Wrap likelihood with prior_transform if needed
+    # Wrap likelihood with prior_transform if needed.  With a context, both
+    # user callables take it as a second argument, and the value reaches every
+    # compiled function here as an argument rather than a closure constant.
     if prior_transform_fn is not None:
-        def loglikelihood_wrapped(x):
-            return loglikelihood_fn(prior_transform_fn(x))
+        if context is None:
+            def loglikelihood_wrapped(x):
+                return loglikelihood_fn(prior_transform_fn(x))
+        else:
+            def loglikelihood_wrapped(x, ctx):
+                return loglikelihood_fn(prior_transform_fn(x, ctx), ctx)
         loglikelihood_for_jit = loglikelihood_wrapped
     else:
         loglikelihood_for_jit = loglikelihood_fn
@@ -336,7 +429,7 @@ def run_nested_sampling(
     else:
         keys = random.split(key, nlive + 1)
         live_x = jnp.stack([prior_sample_fn(k) for k in keys[:-1]])
-        live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x)
+        live_logL = _batch_logL_eval(loglikelihood_for_jit, live_x, context=context)
         # Replace -inf logL with float32-safe large negative value
         safe_min = jnp.finfo(live_logL.dtype).min / 2
         live_logL = jnp.where(jnp.isneginf(live_logL), safe_min, live_logL)
@@ -379,6 +472,8 @@ def run_nested_sampling(
             min_eff=config.min_eff,
             min_ncall=min_ncall,
             ndim=ndim,
+            context=context,
+            config_signature=repr(config),
         )
 
         # Unpack Phase 1 results
@@ -440,6 +535,7 @@ def run_nested_sampling(
             requested_batch_size=config.batch_size,
             memory_frac=config.memory_frac,
             verbose=config.verbose,
+            context=context,
         )
         config = config._replace(batch_size=effective_batch_size)
 
@@ -483,7 +579,7 @@ def run_nested_sampling(
                 _refill_key, live_x, live_logL, _loglstar_init, loglikelihood_for_jit,
                 me_axes, me_logvol_ells, bound_axes, current_scale,
                 rwalk_K, ndim, _ncdim_init, config.queue_size, use_multi_ellipsoid,
-                config.prior_bounds if has_prior_bounds else None)
+                config.prior_bounds if has_prior_bounds else None, context)
 
         # State for Phase 2 (continues from Phase 1)
         _base_state = (
@@ -525,7 +621,7 @@ def run_nested_sampling(
                     & (it < max_iterations)
                     & (worst < _logl_max))
 
-        def body_fn(state):
+        def body_fn(state, context=None):
             live_x = state[0]
             live_logL = state[1]
             iteration = state[8]
@@ -599,7 +695,7 @@ def run_nested_sampling(
                     wk, x_starts, worst_logL, loglikelihood_for_jit,
                     ba, scale, rwalk_K,
                     prior_bounds=config.prior_bounds if has_prior_bounds else None,
-                    walk_schedule=None,
+                    walk_schedule=None, context=context,
                 )
                 valid = logL_cand > worst_logL
                 return (valid, rkey, x_cand, logL_cand, racc + n_acc, rtot + n_tot)
@@ -684,7 +780,7 @@ def run_nested_sampling(
                         & (calls < _max_calls_limit)
                         & (worst < _logl_max_q))
 
-            def body_fn_q(state):
+            def body_fn_q(state, context=None):
                 live_x = state[0]
                 live_logL = state[1]
                 iteration = state[8]
@@ -736,7 +832,7 @@ def run_nested_sampling(
                         rkey, lx, ll, loglstar_r, loglikelihood_for_jit,
                         me_axes_state, me_logvol_ells, state[13], new_sc,
                         rwalk_K, ndim, _ncdim_q, _queue_size, use_multi_ellipsoid,
-                        config.prior_bounds if has_prior_bounds else None)
+                        config.prior_bounds if has_prior_bounds else None, context)
                     return new_sc, qx, ql, qna, qnt, ky
 
                 def _skip_drain(drain_args):
@@ -821,8 +917,8 @@ def run_nested_sampling(
             _body_fn = body_fn
 
             if config.print_progress and TQDM_AVAILABLE:
-                def body_fn_progress(state):
-                    new_state = _body_fn(state)
+                def body_fn_progress(state, context=None):
+                    new_state = _body_fn(state, context)
                     try:
                         loglstar = jnp.min(new_state[1])
                         total_calls_val = new_state[17]
@@ -842,7 +938,15 @@ def run_nested_sampling(
                 chunk_done = (state[17] - state[16]) >= bound_update_interval
                 return (~converged) & (~too_many) & (~chunk_done)
 
-            compiled_chunk = jax.jit(lambda s: lax.while_loop(chunk_cond, body_fn_for_chunk, s))
+            def _chunk(s, ctx):
+                return lax.while_loop(chunk_cond, lambda st: body_fn_for_chunk(st, ctx), s)
+
+            if context is None:
+                compiled_chunk = jax.jit(lambda s: _chunk(s, None))
+            else:
+                compiled_chunk = compiled_unit(
+                    "chunk", _chunk, init_state, context,
+                    _program_key(loglikelihood_for_jit, ndim, context), repr(config))
 
             while total_done < max_iterations:
                 # Build chunk start state: set pos 16 to current total_calls
@@ -855,7 +959,8 @@ def run_nested_sampling(
                     )
                 else:
                     state_with_chunk = (*current_state[:16], jnp.array(calls_at_start, dtype=jnp.int32), current_state[17])
-                current_state = compiled_chunk(state_with_chunk)
+                current_state = (compiled_chunk(state_with_chunk) if context is None
+                                 else compiled_chunk(state_with_chunk, context))
 
                 iteration = int(current_state[8])
                 delta_logZ_val = float(current_state[7])
@@ -936,8 +1041,8 @@ def run_nested_sampling(
 
             _orig_body = body_fn
 
-            def body_fn_prog(state):
-                new_state = _orig_body(state)
+            def body_fn_prog(state, context=None):
+                new_state = _orig_body(state, context)
                 try:
                     loglstar = jnp.min(new_state[1])
                     total_calls_val = new_state[17]
@@ -948,11 +1053,29 @@ def run_nested_sampling(
                     pass
                 return new_state
 
-            final_state = lax.while_loop(cond_fn, body_fn_prog, init_state)
+            if context is None:
+                final_state = lax.while_loop(
+                    cond_fn, lambda st: body_fn_prog(st, None), init_state)
+            else:
+                run_loop = compiled_unit(
+                    "phase2", lambda s, c: lax.while_loop(
+                        cond_fn, lambda st: body_fn_prog(st, c), s),
+                    init_state, context,
+                    _program_key(loglikelihood_for_jit, ndim, context), repr(config))
+                final_state = run_loop(init_state, context)
             if pbar is not None:
                 pbar.close()
         else:
-            final_state = lax.while_loop(cond_fn, body_fn, init_state)
+            if context is None:
+                final_state = lax.while_loop(
+                    cond_fn, lambda st: body_fn(st, None), init_state)
+            else:
+                run_loop = compiled_unit(
+                    "phase2", lambda s, c: lax.while_loop(
+                        cond_fn, lambda st: body_fn(st, c), s),
+                    init_state, context,
+                    _program_key(loglikelihood_for_jit, ndim, context), repr(config))
+                final_state = run_loop(init_state, context)
 
         # Unpack Phase 2 final state
         live_x = final_state[0]
@@ -983,9 +1106,14 @@ def run_nested_sampling(
 
     # Transform samples to physical space
     if prior_transform_fn is not None:
-        samples = jnp.vectorize(prior_transform_fn, signature='(n)->(n)')(
-            worst_x_buffer[_off:_n]
-        )
+        if context is None:
+            samples = jnp.vectorize(prior_transform_fn, signature='(n)->(n)')(
+                worst_x_buffer[_off:_n]
+            )
+        else:
+            samples = jax.vmap(lambda u: prior_transform_fn(u, context))(
+                worst_x_buffer[_off:_n]
+            )
     else:
         samples = worst_x_buffer[_off:_n]
 
