@@ -698,7 +698,7 @@ class DynamicNestedSampler:
         base_sampler.run_nested(
             max_iterations=max_iterations,
             delta_logZ_threshold=dlogz_init,
-            print_progress=False,
+            print_progress=print_progress,
         )
         base_res = self._normalize_static_results(base_sampler.results, nlive_init, 0)
         self.saved_run = base_res
@@ -792,7 +792,7 @@ class DynamicNestedSampler:
             batch_sampler.run_nested(
                 max_iterations=max_iterations,
                 delta_logZ_threshold=dlogz_init,
-                print_progress=False,
+                print_progress=print_progress,
                 init_live_x=init_x,
                 init_live_logL=init_logL,
                 logl_min=logl_min_b,
@@ -882,7 +882,8 @@ class DynamicNestedSampler:
                 res['logzvar'] = np.zeros(n_total)
                 res['logzerr'] = np.zeros(n_total)
         # also expose information as h for consistency with combine output
-        res.setdefault('h', np.asarray(res.get('information', 0.0)))
+        h = np.asarray(res.get('information', 0.0), dtype=float)
+        res.setdefault('h', np.full(n_total, float(h)) if h.ndim == 0 else h)
         return res
 
     def _build_results(self):
@@ -937,9 +938,9 @@ class DynamicNestedSampler:
             print("[dynamic] no results yet")
             return
         r = self._results
-        logz = float(np.asarray(r['logz'])[-1])
-        logzerr = float(np.asarray(r['logzerr'])[-1])
-        h = float(np.asarray(r['h'])[-1])
+        logz = float(np.atleast_1d(r['logz'])[-1])
+        logzerr = float(np.atleast_1d(r['logzerr'])[-1])
+        h = float(np.atleast_1d(r['h'])[-1])
         print(f"[dynamic] niter={len(r['logl'])}, logz={logz:.4f} "
               f"± {logzerr:.4f}, h={h:.2f}, "
               f"ESS={kish_ess(r['logwt']):.0f}, "

@@ -286,11 +286,16 @@ def _run_uniform_phase(loglikelihood_fn, live_x, live_logL, worst_x_buffer,
         valid = logL_batch > worst_logL
         first_valid = jnp.argmax(valid)
         any_valid = jnp.any(valid)
-        x_new = jnp.where(any_valid, u_batch[first_valid], live_x[0])
-        logL_new = jnp.where(any_valid, logL_batch[first_valid], -jnp.inf)
-        # Count actual proposals used (matching Dynesty's nc per iteration)
-        actual_calls = jnp.where(any_valid, first_valid.astype(jnp.int32) + 1,
-                                 jnp.array(unit_cube_batch_size, dtype=jnp.int32))
+        # Keep the live set untouched when no candidate is valid; replacing the
+        # worst point with a duplicate that has logL = -inf corrupts the run.
+        x_new = jnp.where(any_valid, u_batch[first_valid], live_x[worst_idx])
+        logL_new = jnp.where(any_valid, logL_batch[first_valid], worst_logL)
+        # The whole batch was evaluated, so the number of likelihood calls per
+        # iteration is the batch size (as in Dynesty's ncall).  Counting only
+        # the proposals before the first valid one keeps the efficiency at 100%
+        # for a sharply peaked likelihood, and the switch to the random walk
+        # below then never triggers.
+        actual_calls = jnp.array(unit_cube_batch_size, dtype=jnp.int32)
 
         # Update live points
         live_x_new = live_x.at[worst_idx].set(x_new)
