@@ -695,6 +695,8 @@ class DynamicNestedSampler:
         base_sampler = _build_static_sampler(
             self.loglikelihood, self.prior_transform, self.ndim,
             nlive=nlive_init, bound=self.bound, **self.static_kwargs)
+        # The queue size may have been resolved by the static sampler ('auto')
+        self.queue_size = base_sampler.queue_size
         base_sampler.run_nested(
             max_iterations=max_iterations,
             delta_logZ_threshold=dlogz_init,

@@ -135,6 +135,12 @@ class WhileLoopNSResult(NamedTuple):
     init_iter_offset: int = 0       # pre-loaded iteration count (batch mode)
 
 
+# Upper bound on the number of likelihood calls of one sampling phase, as a
+# multiple of max_iterations * rwalk_K, used as a safety net in the loop
+# conditions.
+MAX_CALLS_SAFETY_FACTOR = 20
+
+
 def estimate_batch_size_from_memory(
     loglikelihood_fn, live_x, bound_axes, ndim, rwalk_K,
     requested_batch_size, memory_frac=0.9, verbose=True, context=None,
@@ -773,7 +779,7 @@ def run_nested_sampling(
 
             # cond_fn with safety limit on total calls
             _logl_max_q = jnp.asarray(config.logl_max, dtype=buf_dtype)
-            _max_calls_limit = max_iterations * rwalk_K * 20
+            _max_calls_limit = max_iterations * rwalk_K * MAX_CALLS_SAFETY_FACTOR
 
             def cond_fn_q(state):
                 dlz = state[7]

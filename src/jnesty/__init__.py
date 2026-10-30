@@ -13,7 +13,8 @@ Example:
 
 __version__ = "0.1.0"
 
-from .jnesty import NestedSampler
+from .jnesty import (NestedSampler, DEFAULT_QUEUE_SIZE,
+                     LEGACY_STEPS_PER_WALK, auto_queue_size)
 from .dynamic import DynamicNestedSampler
 from .sampler import run_nested_sampling, WhileLoopNSConfig, WhileLoopNSResult
 from .results import Results, save_results, load_results
@@ -33,6 +34,11 @@ __all__ = [
     'Results',
     'save_results',
     'load_results',
+
+    # Lane (queue) settings
+    'DEFAULT_QUEUE_SIZE',
+    'LEGACY_STEPS_PER_WALK',
+    'auto_queue_size',
 
     # Low-level
     'run_nested_sampling',

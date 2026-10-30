@@ -15,6 +15,92 @@ import warnings
 from .sampler import run_nested_sampling, WhileLoopNSConfig
 from .results import Results, format_results
 
+# Default number of parallel random walks (lanes) of the queue mode.  The 
+# walks of one refill run in parallel while their steps run in sequence, so 
+# this is the only parallel axis available inside a walk.
+DEFAULT_QUEUE_SIZE = 8
+# Number of random walk steps per walk of the legacy (non-queue) batch mode.
+LEGACY_STEPS_PER_WALK = 5
+
+
+def auto_queue_size(loglikelihood, prior_transform, ndim,
+                    candidates=(8, 32, 64, 128), memory_frac=0.9,
+                    context=None, verbose=False):
+    '''
+    Choose the number of parallel random walks (lanes) from the measured 
+    throughput of the likelihood.
+
+    One queue refill runs 'queue_size' walks in parallel whose steps run in 
+    sequence, so the cost of one nested sampling iteration is rwalk_K times 
+    the time of one evaluation of 'queue_size' points.  The lanes are chosen 
+    where the time per point is the smallest, i.e., where the GPU is 
+    saturated, and where one batch still fits in the memory budget.
+
+    Parameters
+    ----------
+    loglikelihood : callable
+        The log-likelihood function of one point.
+    prior_transform : callable
+        The prior transform of one point.
+    ndim : int
+        The number of dimensions.
+    candidates : tuple (default: (8, 32, 64, 128))
+        The candidate lane numbers, tested in increasing order.
+    memory_frac : float (default: 0.9)
+        The fraction of the GPU memory that one batch may use.
+    context : optional
+        The context passed to the log-likelihood and the prior transform.
+    verbose : bool (default: False)
+        Print the measured time per point of every candidate if True.
+
+    Returns
+    -------
+    queue_size : int
+        The number of lanes with the smallest time per point.
+    '''
+    import time
+    stats = jax.devices()[0].memory_stats()
+    budget = int(stats['bytes_limit'] * memory_frac) if stats is not None else None
+    if context is None:
+        loglike, ptform = loglikelihood, prior_transform
+    else:
+        loglike = lambda x: loglikelihood(x, context)
+        ptform = lambda u: prior_transform(u, context)
+    # A batch of prior samples is enough: the cost only depends on the shapes
+    pos = jax.vmap(ptform)(random.uniform(
+        random.PRNGKey(0), (int(max(candidates)), ndim)))
+    vmapped = jax.vmap(loglike)
+    best, best_time = int(candidates[0]), np.inf
+    for q in candidates:
+        batch = lambda p, q=q: vmapped(p[:q])
+        try:
+            compiled = jax.jit(batch).lower(pos).compile()
+            ma = compiled.memory_analysis() if hasattr(
+                compiled, 'memory_analysis') else None
+            peak = getattr(ma, 'peak_memory_in_bytes', None) if ma is not None else None
+            if peak is None and ma is not None:
+                peak = (getattr(ma, 'temp_size_in_bytes', 0)
+                        + getattr(ma, 'argument_size_in_bytes', 0)
+                        + getattr(ma, 'output_size_in_bytes', 0)) or None
+            if (peak is not None) and (budget is not None) and (peak > budget):
+                break  # The larger candidates would not fit either
+            for _ in range(3):
+                compiled(pos).block_until_ready()
+            t0 = time.perf_counter()
+            for _ in range(5):
+                compiled(pos).block_until_ready()
+            dt = (time.perf_counter() - t0) / 5. / q
+        except Exception as e:
+            if verbose:
+                print('  Lane probe: queue_size={0} failed ({1})'.format(q, e))
+            break
+        if verbose:
+            print('  Lane probe: queue_size={0:4d}, {1:.3f} ms/point'.format(
+                q, dt * 1e3))
+        if dt < best_time:
+            best, best_time = q, dt
+    return int(best)
+
 
 class NestedSampler:
     """
@@ -55,10 +141,14 @@ class NestedSampler:
         Number of parallel walks for GPU-parallel likelihood evaluation.
         Only used when queue_size=0 (legacy mode). None (default): auto-tuned
         to ~5 steps/walk. Set to 1 to disable parallelism.
-    queue_size : int or None, optional
+    queue_size : int, 'auto', or None, optional
         Dynesty-style queue mode. None (default): automatic — 8 for
         bound='multi' (matching Dynesty's multiprocessing), 0 otherwise.
-        Each queue entry gets full rwalk_K steps; scale adapts at queue drain.
+        An integer sets the number of parallel walks directly. 'auto' picks
+        the number of walks whose measured time per likelihood evaluation is
+        the smallest (see auto_queue_size), which also keeps the batch inside
+        the memory budget.  Each queue entry gets full rwalk_K steps; scale
+        adapts at queue drain.
     memory_frac : float, optional
         Fraction of GPU memory to use for batch walks. Default: 0.9.
         Caps batch_size if it would exceed this fraction of GPU memory.
@@ -81,7 +171,7 @@ class NestedSampler:
         bound_update_interval: Optional[Union[int, float]] = None,
         max_ellipsoids: int = 20,
         batch_size: Optional[int] = None,
-        queue_size: Optional[int] = None,
+        queue_size: Optional[Union[int, str]] = None,
         memory_frac: float = 0.9,
         unit_cube_batch_size: int = 200,
         min_eff: float = 10.0,
@@ -148,9 +238,21 @@ class NestedSampler:
         # Dynesty default: always uses multiprocessing (queue) with multi-ellipsoid.
         if queue_size is None:
             if bound == 'multi':
-                queue_size = 8  # Dynesty-style GPU parallelism
+                queue_size = DEFAULT_QUEUE_SIZE  # Dynesty-style GPU parallelism
             else:
                 queue_size = 0  # legacy mode for non-multi bounds
+        elif isinstance(queue_size, str):
+            if queue_size != 'auto':
+                raise ValueError("queue_size must be an integer, 'auto', or "
+                                 "None (got '{0}')!".format(queue_size))
+            if bound == 'multi':
+                queue_size = auto_queue_size(
+                    loglikelihood, prior_transform, ndim, 
+                    memory_frac=memory_frac, context=context, verbose=verbose)
+            else:
+                queue_size = 0  # the queue mode needs the multi-ellipsoid bound
+                if verbose:
+                    print('Queue mode needs bound=\'multi\', so queue_size=0')
 
         if queue_size > 1:
             # Queue mode: scale adapts at queue drain (no per-iteration noise)
@@ -159,7 +261,7 @@ class NestedSampler:
                 print(f"Queue mode: queue_size={queue_size}, "
                       f"each walk gets full {rwalk_K} steps")
         elif batch_size is None:
-            steps_per_walk = 5
+            steps_per_walk = LEGACY_STEPS_PER_WALK
             batch_size = max(1, rwalk_K // steps_per_walk)
             if verbose:
                 print(f"Auto-tuned batch_size = {batch_size} "
