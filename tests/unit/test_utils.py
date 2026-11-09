@@ -1,7 +1,25 @@
 import numpy as np
+import pytest
+import jax
 import jax.numpy as jnp
 from jax import random
 from jnesty.utils import randsphere, logsubexp, logvol_prefactor, _convert_to_numpy
+
+
+@pytest.fixture(scope='module', autouse=True)
+def jax_enable_x64():
+    """Run this module in float64 so log-space identities are exact.
+
+    ``jax.config.jax_enable_x64`` is process-global; save the caller's value
+    and restore it afterwards so the setting never leaks into other modules
+    (or into a session where plain ``import jnesty`` must stay float32).
+    """
+    old = jax.config.jax_enable_x64
+    jax.config.update('jax_enable_x64', True)
+    try:
+        yield
+    finally:
+        jax.config.update('jax_enable_x64', old)
 
 
 class TestRandsphere:

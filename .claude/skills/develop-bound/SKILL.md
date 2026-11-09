@@ -7,6 +7,12 @@ description: Guide for adding a new bounding method to JNesty.
 
 Bounding methods live in `src/jnesty/bounding.py`. Each implements the `Bound` interface and is registered in `BOUND_REGISTRY` for lookup by string name.
 
+This skill covers the **Dynesty-style** bounds used by `NestedSampler` /
+`DynamicNestedSampler` (`src/jnesty/bounding.py`). The JAX Nautilus engine has
+its own, unrelated bound classes in `src/jnesty/nautilus/bounds.py`
+(`JaxNautilusBound`, `JaxUnion`, `JaxNeuralBound`, ...); see the
+`/develop-nautilus` skill for those.
+
 The core NS loop in `src/jnesty/sampler.py` calls `bound_obj.fit()` to update the bound, `bound_obj.get_axes()` for proposal generation, and optionally uses bound-specific state for multi-ellipsoid proposals.
 
 ## Bound Interface

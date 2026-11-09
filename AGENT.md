@@ -1,6 +1,6 @@
-# JNesty Development Notes for Claude
+# JNesty Development Notes for Agents
 
-This file tells Claude Code how to work with me on this repository.
+This file tells AI coding agents how to work with me on this repository.
 
 ## Project
 

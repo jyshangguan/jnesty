@@ -1,6 +1,6 @@
 ---
 name: /usage
-description: JNesty usage guide — public API, parameters, results access, FITS I/O, bounding methods, tuning, and plotting.
+description: JNesty usage guide — public API, parameters, results access, FITS I/O, bounding methods, tuning, plotting, and the Nautilus importance sampler.
 ---
 
 ## Quick Start
@@ -234,3 +234,148 @@ sampler = NestedSampler(loglike, prior_transform, ndim=100,
 # auto: rwalk_K=120, rwalk_step_scale=1.0
 sampler.run_nested(delta_logZ_threshold=0.1)
 ```
+
+## NautilusSampler (importance nested sampling)
+
+`NautilusSampler` is a second sampling engine: our JAX/GPU implementation of
+the Nautilus importance nested sampler. The nested-sampling idea is the same
+but the mechanics differ — every likelihood evaluation is kept, neural-network
+emulator shells are added, and evidence/posterior weights come from shell
+volumes. It is **not** a drop-in replacement for `NestedSampler`: different run
+controls and result objects.
+
+### Install
+
+```bash
+pip install 'jnesty[nautilus]'
+```
+
+Plain `import jnesty` never imports the engine or its dependencies. The extra
+provides `nautilus-sampler` (upstream CPU sampler — support routines, the
+reference emulator, parity tests), `optax`, `scikit-learn`, `threadpoolctl`
+and `h5py`.
+
+### Minimal example
+
+```python
+import jax.numpy as jnp
+from jnesty import NautilusSampler
+
+def loglikelihood(x):
+    return -0.5 * jnp.sum(((x - 0.5) / 0.01) ** 2)
+
+def prior_transform(u):
+    return u  # uniform prior on [0, 1]^ndim
+
+sampler = NautilusSampler(loglikelihood, prior_transform, ndim=2,
+                          nlive=500, seed=0)
+sampler.run(f_live=0.01, n_eff=10000, verbose=True)
+
+points, log_w, log_l = sampler.posterior()   # log_w are normalised
+print(sampler.log_z, sampler.n_eff, sampler.n_like)
+```
+
+Argument order is JNesty's — likelihood first, prior transform second (the
+native `JaxSampler` takes them the other way round). Constructing the sampler
+imports the engine lazily on first use.
+
+### Constructor parameters
+
+```python
+NautilusSampler(loglikelihood, prior_transform, ndim, nlive=500,
+                seed=None, device=None, context=None, **kwargs)
+```
+
+| kwarg | default | meaning |
+|-------|---------|---------|
+| `nlive` | 500 | live points (native engine default is 2000; the adapter lowers it) |
+| `n_update` | `nlive` | likelihood calls between bound updates during exploration |
+| `n_batch` | 100 | likelihood evaluations per batched step |
+| `n_networks` | 4 | emulator networks per bound; `0` disables neural bounds (diagnostic) |
+| `n_like_new_bound` | `10*nlive` | calls a new bound gets before the next update |
+| `enlarge_per_dim` | 1.1 | per-dimension bound enlargement factor |
+| `split_threshold` | 100 | volume ratio that triggers splitting a bound |
+| `periodic` | None | per-dimension periodic flags (bool array/list) |
+| `vectorized` | False | likelihood already accepts `(n_points, ...)` batches |
+| `pass_dict` | None | auto: False for callable priors, True for `nautilus.Prior` |
+| `seed` | None | RNG seed for reproducible runs |
+| `device` | None | JAX platform, e.g. `'gpu'` or `'cpu'` |
+| `context` | None | extra argument passed to both likelihood and prior (keeps data out of compiled kernels) |
+| `fit_backend` | `'numpy'` | MVEE/GMM fitting backend: `numpy`, `numpy_rank1`, `cpu_rank1`, `jax` |
+| `neural_backend` | `'jax'` | `'jax'` (device emulator) or `'reference'` (upstream scikit-learn, parity only) |
+| `filepath` / `resume` | None / True | HDF5 checkpoint path; resume from it when it exists |
+| `blobs_dtype` | None | dtype for structured likelihood blobs |
+
+`**kwargs` are forwarded verbatim to `jnesty.nautilus.sampler.JaxSampler`.
+
+### Run controls
+
+```python
+sampler.run(f_live=0.01, n_shell=1, n_eff=10000, n_like_max=np.inf,
+            discard_exploration=False, timeout=np.inf, verbose=False)
+```
+
+- `f_live`: target live-set fraction at the end of exploration (smaller = more thorough).
+- `n_shell`: minimum samples per shell during the refinement phase.
+- `n_eff`: target total effective sample size — raise it for a more accurate
+  evidence/posterior.
+- `n_like_max`: hard cap on likelihood evaluations.
+- `discard_exploration`: drop exploration-phase points from `posterior()`.
+- `timeout`: wall-clock cap in seconds.
+- `verbose`: one-line status refreshed roughly every two seconds.
+
+Returns `True` on normal completion and `False` when a likelihood-call or time
+limit stopped the run early.
+
+### Results
+
+- `posterior(return_as_dict=None, equal_weight=False, equal_weight_boost=1.0,
+  return_blobs=False)` → `(points, log_w, log_l)` with normalised log-weights;
+  `return_blobs=True` adds the blobs as a fourth element.
+- `log_z`: estimated log evidence.
+- `n_eff`: total effective sample size — the main quality diagnostic.
+- `n_like`: total number of likelihood evaluations.
+- `eta`: estimated asymptotic sampling efficiency.
+- `discard_exploration`: also settable as a property.
+- `native_sampler`: the underlying `JaxSampler`; any engine attribute or
+  method the adapter does not forward explicitly is reachable there (the
+  adapter forwards unknown names via `__getattr__`).
+
+**No `logzerr`**: Nautilus does not produce a Dynesty-style evidence error.
+Monitor `n_eff`, and re-seed to gauge run-to-run scatter.
+
+### Checkpointing
+
+```python
+sampler = NautilusSampler(..., filepath='run.h5', resume=True)
+sampler.run(...)                          # checkpoints after each batch
+sampler.write('run.h5', overwrite=True)   # explicit checkpoint
+```
+
+Limitations:
+- likelihood **blobs are not stored**: a run with blobs raises `ValueError` on
+  write/resume. Use a blob-free likelihood for checkpointed runs.
+- `neural_backend='reference'` cannot be checkpointed (scikit-learn weights are
+  not serialised) — unsupported by design; use `'jax'`.
+- Backend/bound metadata (`fit_backend`, `neural_backend`, `periodic`,
+  `n_networks`, ...) is persisted; resume with the same options.
+- `h5py` is required (part of the `jnesty[nautilus]` extra).
+
+### JAX x64 and compilation cache
+
+Constructing a sampler — or importing `jnesty.nautilus` — enables JAX float64
+mode and an on-disk compilation cache process-wide. Plain `import jnesty` does
+not. The cache defaults to `$XDG_CACHE_HOME/nautilus_jax`; set
+`NAUTILUS_JAX_CACHE_DIR` to relocate it, or to an empty string to disable it.
+The first run compiles several programs (slow start); later runs reuse the
+cache. Because x64 is process-global, a mixed session sees float64 defaults
+after the first Nautilus sampler is built.
+
+### Which engine to choose
+
+| Situation | Engine |
+|-----------|--------|
+| Dynesty-compatible API, FITS output, plotting helpers, dynamic NS | `NestedSampler` / `DynamicNestedSampler` |
+| High-dimensional, cheap vectorizable likelihood, neural-bound efficiency | `NautilusSampler` |
+| You need a Dynesty-style `logzerr` | Dynesty-style samplers (`NautilusSampler` has none) |
+| You need bit-for-bit upstream-nautilus behaviour | upstream `nautilus.Sampler` (not re-exported) |

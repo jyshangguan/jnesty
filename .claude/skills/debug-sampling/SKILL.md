@@ -7,7 +7,25 @@ description: Diagnosing convergence problems, poor acceptance rates, and incorre
 
 When investigating sampling issues, **always compare with Dynesty first**. Dynesty has years of battle-tested optimization. If Dynesty gets the right answer and JNesty doesn't, the issue is in JNesty. If both disagree with theory, the issue may be in the problem setup.
 
-See CLAUDE.md: "Critical Development Principle: Check Dynesty First."
+See AGENT.md: "Critical Development Principle: Check Dynesty First."
+
+## Check the Reference Nautilus First
+
+For issues in the JAX Nautilus engine (`NautilusSampler` / `JaxSampler`) the
+analogue of the Dynesty-first rule is: **compare against the reference
+Nautilus first**.
+
+- The reference is the upstream CPU sampler from the external
+  `nautilus-sampler` package (importable as `nautilus`). Run the same problem
+  with the same `n_live` / `f_live` / `n_eff` there and compare `log_z`,
+  `n_like` and the posterior marginals. If upstream agrees with theory and
+  `JaxSampler` does not, the bug is in our engine (`src/jnesty/nautilus/`).
+- The separate `develop/` tree (vendored at commit `7de6eb1`) contains the
+  reference `nautilus` sources next to the JAX port they seeded, and serves as
+  the parity oracle. Treat it as read-only: **never modify `develop/`**, never
+  import it from the package.
+- `tests/nautilus/test_jax_parity.py` asserts engine-vs-upstream parity; start
+  there when a numeric discrepancy appears.
 
 ## Common Failure Modes
 
@@ -92,6 +110,70 @@ See CLAUDE.md: "Critical Development Principle: Check Dynesty First."
 - Default `min_ncall=2*nlive` ensures enough initial exploration
 - Increase `unit_cube_batch_size` (default 200) for faster Phase 1 on GPU
 
+## Nautilus Engine Failure Modes
+
+### Likelihood returns NaN (the engine raises ValueError)
+
+The engine validates likelihood outputs: a NaN would propagate into the shell
+evidence, so it raises a `ValueError` instead of silently producing a NaN
+`log_z`. Return `-inf` (or a large negative finite value) for forbidden
+regions; never return NaN.
+
+### f_live stalls, or bounds never shrink
+
+**Symptoms**: `n_like` keeps growing while the live-set fraction stays above
+the `f_live` target and the remaining-evidence fraction plateaus.
+
+**Causes / fixes**:
+- too few live points for the dimension → increase `nlive` (2x, 4x)
+- the neural emulator is rejecting valid points → set `n_networks=0` to
+  disable it and isolate emulator vs bound/proposal effects
+- the prior transform or likelihood is not JAX-traceable (Python control flow
+  on traced values, `np.asarray` on device arrays, in-place mutation) → make
+  both pure JAX functions
+- `n_update` / `n_like_new_bound` too large for a short run → bound updates
+  never fire; shorten them for debugging
+
+### Low n_eff or a biased posterior
+
+- Raise the `n_eff` target passed to `run()` (default 10000) and inspect
+  `sampler.n_eff` and the per-shell `shell_n_eff` until the occupation is
+  adequate.
+- Consider `discard_exploration=True`: exploration-phase points are then
+  excluded from `posterior()`, removing the low-likelihood tail that biases a
+  short run.
+- There is no `logzerr`; judge run-to-run stability by re-seeding and
+  comparing `log_z` at equal `n_eff`.
+
+### Checkpoint errors
+
+- `ValueError: Checkpointing a run with likelihood blobs is not supported` —
+  the HDF5 schema has no blob storage. Use a plain `log_l` likelihood (no
+  blobs) when running with `filepath=` or calling `write()`.
+- `ValueError` for `neural_backend='reference'` — the reference emulator keeps
+  its weights in a scikit-learn object that cannot be serialised.
+  Checkpointing requires `neural_backend='jax'`; this is unsupported by
+  design, not a bug.
+- Neural/union backend metadata (`fit_backend`, `neural_backend`, periodic
+  settings) is persisted; resume with the same options or the restored bounds
+  will not match the original run.
+
+### x64 / precision surprises
+
+Importing `jnesty.nautilus` or constructing a `NautilusSampler` enables JAX
+float64 mode process-wide, plus the on-disk compilation cache. In a mixed
+session every sampler created afterwards sees `jax_enable_x64=True`, so dtype
+promotions differ from a Dynesty-only session. Never toggle x64 back off
+mid-session — JAX treats it as a process-global setting.
+
+### Upstream classes are not re-exported
+
+`jnesty` exports only `NautilusSampler` (and the Dynesty-style API). The
+upstream CPU `Sampler` and `Prior` are **not** re-exported: import them from
+`nautilus` (the `nautilus-sampler` package), never from `jnesty`. A
+`nautilus.Prior` instance is accepted by the engine, but its transform runs on
+the host with SciPy rather than on the device.
+
 ## Reading Diagnostic Plots
 
 ### Run Plot (`plotting.runplot()`)
@@ -175,18 +257,36 @@ Scale adapts only at queue drain in queue mode. If `queue_size` is very large, a
 
 ```bash
 # Syntax check after code changes
+python -m py_compile src/jnesty/dynesty_sampler.py
 python -m py_compile src/jnesty/internal_samplers.py
 python -m py_compile src/jnesty/bounding.py
 python -m py_compile src/jnesty/sampler.py
-python -m py_compile src/jnesty/jnesty.py
+python -m py_compile src/jnesty/nautilus/sampler.py
 
 # Run unit tests
 pytest tests/unit/test_queue_mode.py -v
 pytest tests/integration/test_queue_and_defaults.py -v
+python -m pytest tests/nautilus -q          # quick engine check (5 passed, 80 deselected)
 
 # Run a quick demo
 python dev/demo/01_multimodal_gaussian_mixture_jnesty.py
 
 # Import check
 python -c "from jnesty import NestedSampler, save_results, load_results; print('OK')"
+python -c "from jnesty import NautilusSampler; print('OK')"
+```
+
+For a Nautilus engine bug, add the reference comparison before changing code:
+
+```python
+import nautilus                          # upstream CPU oracle
+from jnesty.nautilus import JaxSampler
+
+ref = nautilus.Sampler(prior, loglike, n_live=nlive, seed=0)
+ref.run(f_live=0.01, n_eff=10000)
+ours = JaxSampler(prior, loglike, n_dim=ndim, n_live=nlive, seed=0)
+ours.run(f_live=0.01, n_eff=10000)
+
+print(ref.log_z, ours.log_z)             # should agree well within run scatter
+print(ref.n_like, ours.n_like)           # similar order of magnitude
 ```

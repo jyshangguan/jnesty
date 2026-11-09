@@ -1,8 +1,15 @@
 # Examples
 
-Five benchmark problems demonstrating JNesty's capabilities. Each example
-shows the problem definition, full code, expected results, and sample output
-figures.
+Five benchmark problems demonstrating JNesty's capabilities. The examples come
+in two flavours: **Dynesty-style** variants (`NestedSampler`,
+`DynamicNestedSampler`) and **Nautilus** variants (`NautilusSampler`, our JAX
+importance nested sampler). The code below is Dynesty-style unless a section
+is explicitly labelled "Nautilus variant"; examples 1 and 2 have both.
+Examples 3-5 are Dynesty-style only — the high-dimensional, Gaussian-shell and
+dynamic demos currently have no Nautilus variant.
+
+Each example shows the problem definition, full code, expected results, and
+sample output figures; every runnable demo lives under `dev/demo/`.
 
 ## 1. Multi-Modal Gaussian Mixture (5D)
 
@@ -49,6 +56,23 @@ corner plot showing both modes clearly separated:
 :align: center
 ```
 
+### Nautilus variant
+
+```python
+from jnesty import NautilusSampler
+
+sampler = NautilusSampler(loglikelihood, prior_transform, ndim=5,
+                          nlive=500, n_networks=4, seed=0)
+sampler.run(f_live=0.01, n_eff=10000)
+points, log_w, log_l = sampler.posterior()
+print(sampler.log_z, sampler.n_eff)
+```
+
+The evidence estimate should be close to the Dynesty-style value above,
+$\log Z \approx -6.87$ (approximate). There is no `logzerr` for this engine —
+monitor the effective sample size `n_eff` instead. The runnable script is
+`dev/demo/01_multimodal_gaussian_mixture_nautilus.py`.
+
 ---
 
 ## 2. Rosenbrock Banana (2D)
@@ -91,6 +115,23 @@ The corner plot shows the characteristic curved banana shape:
 :width: 600px
 :align: center
 ```
+
+### Nautilus variant
+
+```python
+from jnesty import NautilusSampler
+
+sampler = NautilusSampler(loglikelihood, prior_transform, ndim=2,
+                          nlive=500, n_networks=4, seed=0)
+sampler.run(f_live=0.01, n_eff=10000)
+points, log_w, log_l = sampler.posterior()
+print(sampler.log_z, sampler.n_eff)
+```
+
+The evidence estimate should be close to the Dynesty-style value above,
+$\log Z \approx -4.41$ (approximate). There is no `logzerr` for this engine —
+monitor the effective sample size `n_eff` instead. The runnable script is
+`dev/demo/02_rosenbrock_banana_nautilus.py`.
 
 ---
 

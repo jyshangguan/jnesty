@@ -7,16 +7,51 @@ description: JNesty code architecture — modules, data flow, key data structure
 
 ```
 src/jnesty/
-├── __init__.py            # Public exports
-├── jnesty.py              # NestedSampler class (user-facing API)
+├── __init__.py            # Public exports (NestedSampler, DynamicNestedSampler, NautilusSampler, ...)
+├── dynesty_sampler.py     # NestedSampler + DynamicNestedSampler (Dynesty-style public API)
+├── nautilus_sampler.py    # NautilusSampler (public adapter; lazy engine import)
+├── nautilus/              # OUR JAX Nautilus engine (JaxSampler, bounds, evaluator, emulator)
+├── jnesty.py              # Compatibility shim: re-exports the static API (filename = package name)
+├── dynamic.py             # Compatibility shim: re-exports DynamicNestedSampler + _dynamic helpers
+├── _dynamic.py            # Dynamic-NS numerical helpers (no sampler classes)
 ├── sampler.py             # Core NS loop (run_nested_sampling, two-phase)
 ├── internal_samplers.py   # Proposal strategies (InternalSampler + RWalkSampler + vmap_queue_refill)
-├── bounding.py            # Bounding methods (Bound + UnitCube/Single/Multi)
+├── bounding.py            # Dynesty-style bounding (Bound + UnitCube/Single/Multi)
 ├── multi_ellipsoid.py     # JIT-compiled multi-ellipsoid fitting
 ├── results.py             # Results class + format_results() + FITS I/O
 ├── plotting.py            # Dynesty-style plotting (built-in, no dynesty dependency)
 └── utils.py               # Shared utilities (randsphere, logsubexp, mean_and_cov)
 ```
+
+`src/jnesty/jnesty.py` and `src/jnesty/dynamic.py` are **compatibility shims only**
+(historical imports such as `from jnesty.jnesty import NestedSampler` must keep
+working). Note that the static shim's filename equals the package name; never
+confuse `src/jnesty/jnesty.py` (shim) with `src/jnesty/` (the package root).
+
+### Nautilus engine subpackage
+
+```
+src/jnesty/nautilus/
+├── __init__.py        # Engine exports; initialize_runtime() on import (x64 + compilation cache)
+├── sampler.py         # JaxSampler (nested neural-network shells)
+├── bounds.py          # JaxNautilusBound, JaxUnion, JaxNeuralBound, JaxEllipsoid,
+│                      # JaxUnitCube, JaxUnitCubeEllipsoidMixture, PhaseShift
+├── eval.py            # JaxEvaluator (batched prior/likelihood evaluation)
+├── neural.py          # Emulator, train_emulator, ReferenceEmulator
+├── fitting.py         # fit_mvee / fit_gmm; backends numpy (default), numpy_rank1, cpu_rank1, jax
+├── geometry.py        # Unified low-level bound geometry (contains/sample/log_v kernels)
+├── gmm.py             # GMM helpers used by bound splitting
+├── _jit.py            # Shape-bucketed JIT helpers (padded_eval, stack_eval, bucket_size)
+├── random.py          # PRNG key helpers (take_key, finish_key) for bound sampling
+├── checkpoint.py      # HDF5 I/O (write_sampler / read_sampler)
+└── _config.py         # initialize_runtime(): x64 + on-disk compilation cache (idempotent)
+```
+
+"Nautilus" always means OUR JAX implementation in `src/jnesty/nautilus/`. The
+external `nautilus-sampler` package is a support dependency (optional
+`jnesty[nautilus]` extra) used for upstream fitting helpers, the reference
+emulator, `Prior` compatibility and parity tests — its CPU `Sampler` is never
+re-exported.
 
 ## Data Flow
 
@@ -24,7 +59,7 @@ src/jnesty/
 User code
   │
   ▼
-NestedSampler (jnesty.py)          ← User-facing API
+NestedSampler (dynesty_sampler.py) ← Dynesty-style public API
   │  __init__: configure parameters, auto-tune defaults
   │  run_nested(): build config, call core loop, format results
   │
@@ -65,6 +100,21 @@ format_results (results.py)        ← Raw result → Results object
   ▼
 Results object                      ← Dict wrapper with attribute access
      save_results() / load_results() for FITS I/O
+
+DynamicNestedSampler (dynesty_sampler.py)  ← Dynesty-style dynamic NS
+  └─> helpers in _dynamic.py               ← Weights/stopping/combine (dynesty-faithful)
+
+NautilusSampler (nautilus_sampler.py)      ← Separate importance-NS engine
+  │  JNesty argument order: (loglikelihood, prior_transform, ndim, ...)
+  │  Engine is imported lazily on first construction (jnesty[nautilus] extra);
+  │  construction enables JAX x64 + the compilation cache process-wide
+  ▼
+JaxSampler (nautilus/sampler.py)           ← OUR JAX Nautilus engine
+  ├─> JaxEvaluator (nautilus/eval.py)      # batched prior/likelihood evaluation
+  ├─> JaxNautilusBound & friends (nautilus/bounds.py)  # neural + union bounds
+  ├─> Emulator / train_emulator (nautilus/neural.py)   # optax-trained networks
+  └─> checkpoint.py (HDF5 write/resume via filepath= / sampler.write())
+  → posterior() → (points, log_w, log_l); log_z / n_eff / n_like / eta properties
 ```
 
 ## Key Data Structures
@@ -286,7 +336,8 @@ FITS file (astropy.io.fits)
 
 ## Demo Scripts
 
-Located in `dev/demo/`. Each problem has a JNesty and Dynesty variant:
+Located in `dev/demo/`. Most problems have a JNesty and Dynesty variant
+(01–02 also have a `NautilusSampler` variant; 05 covers the dynamic sampler):
 
 | Demo | Problem | Dimension | Key Test |
 |------|---------|-----------|----------|
@@ -308,22 +359,41 @@ Output goes to `output_0X_jnesty/` or `output_0X_dynesty/` with FITS results and
 tests/
 ├── unit/
 │   ├── test_bounding.py            # UnitCube, SingleEllipsoid, MultiEllipsoid
+│   ├── test_dynamic_faithful.py    # _dynamic.py helpers vs Dynesty formulas
 │   ├── test_internal_samplers.py   # RWalkSampler, _single_walk, apply_reflect
 │   ├── test_multi_ellipsoid.py     # Multi-ellipsoid fitting
 │   ├── test_plotting.py            # Plotting functions
+│   ├── test_queue_mode.py          # Queue mode behavior
 │   ├── test_results.py             # Results formatting, FITS I/O
 │   ├── test_sampler_unit.py        # Sampler unit tests
-│   ├── test_utils.py               # Utility functions
-│   └── test_queue_mode.py          # Queue mode behavior
+│   └── test_utils.py               # Utility functions
 ├── integration/
-│   ├── test_sampler.py             # Full NS loop integration
+│   ├── test_dynamic.py             # DynamicNestedSampler integration
+│   ├── test_jnesty_api.py          # API compatibility (incl. shims)
 │   ├── test_queue_and_defaults.py  # Queue mode + auto-defaults
-│   └── test_jnesty_api.py          # API compatibility
+│   └── test_sampler.py             # Full NS loop integration
+└── nautilus/                       # JAX Nautilus engine + adapter tests
+    ├── test_import_side_effects.py # import jnesty must not touch JAX config
+    ├── test_jax_bound_reuse.py     # Bound reuse/caching paths
+    ├── test_jax_geometry.py        # geometry.py kernels
+    ├── test_jax_multi_cache.py     # Multi-bound compile cache
+    ├── test_jax_mvee_rank1.py      # rank-1 MVEE backends
+    ├── test_jax_neural.py          # neural emulator training/prediction
+    ├── test_jax_parity.py          # Parity vs upstream nautilus (oracle)
+    ├── test_jax_sampler.py         # End-to-end JaxSampler runs
+    ├── test_jax_training_prep.py   # Training-array preparation
+    └── test_nautilus_adapter.py    # NautilusSampler public adapter
 ```
+
+`tests/nautilus/` deliberately has **no `__init__.py`**: adding one makes
+pytest put that directory on `sys.path` at collection time, where it shadows
+the real upstream `nautilus` package that the parity tests import.
 
 Run with:
 ```bash
-pytest tests/ -v
+python -m pytest                       # default suite (non-slow)
+python -m pytest tests/nautilus -q     # quick engine check (5 passed, 80 deselected)
+python -m pytest -o addopts='' tests/nautilus -q  # full engine suite (~2.5 min)
 ```
 
 ## Legacy Code

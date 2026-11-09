@@ -205,3 +205,96 @@ Key parameters:
 - `nlive_batch`: live points per batch (default = `nlive`)
 - `maxbatch`: maximum number of batches
 - `n_effective`: target effective sample size for stopping
+
+## Importance Nested Sampling (Nautilus)
+
+`NautilusSampler` exposes importance nested sampling. It is our JAX/GPU port
+of the Nautilus algorithm, implemented by `jnesty.nautilus.JaxSampler` (see
+`src/jnesty/nautilus/`); the external `nautilus-sampler` package is only a
+support dependency (reference fitting routines, the reference emulator,
+`Prior` compatibility and parity tests), never the CPU `Sampler` itself. The
+port keeps the algorithm and moves the numeric work — likelihood and prior
+evaluation, bound construction, containment tests, emulator training and
+prediction — onto the JAX device; shell bookkeeping, stopping decisions and
+checkpointing stay on the host.
+
+### Nested neural-network bounds
+
+The live set is enclosed by a sequence of nested bounds. Each bound combines a
+union of minimum-volume enclosing ellipsoids, fitted to the live points and
+their above-threshold samples, with an ensemble of MLP emulators that predicts
+whether a proposal clears the current likelihood threshold
+(`JaxNeuralBound`). The emulator ensemble size is `n_networks` (default 4);
+`n_networks=0` disables the neural rejection step and leaves a purely
+ellipsoidal bound. `JaxNautilusBound` gathers the non-overlapping bounds plus
+one outer bound used for proposals.
+
+### Shells, evidence and point weights
+
+Bound $i$ defines the shell
+
+$$S_i = B_i \setminus \bigcup_{k>i} B_k,$$
+
+the part of bound $i$ not already covered by any later (inner) bound. Every
+likelihood evaluation is kept. When a shell is updated from its stored points,
+with $n_i$ points out of $n_{\text{sample},i}$ Monte Carlo volume draws and mean
+likelihood $\bar{L}_i$, its statistics are
+
+$$\log V_i = \log V(B_i) + \log\frac{n_i}{n_{\text{sample},i}}, \qquad
+\log \bar{L}_i = \operatorname{logsumexp}(\log L) - \log n_i,$$
+
+and the evidence is the importance sum over shells
+
+$$\log Z = \operatorname{logsumexp}_i\left(\log V_i + \log \bar{L}_i\right).$$
+
+Each retained point contributes the weight
+
+$$\log w = \log V_i - \log n_i + \log L,$$
+
+and `posterior()` returns `(points, log_w, log_l)` with those weights
+normalised. `log_z`, `n_eff` (Kish effective sample size), `n_like` (total
+likelihood evaluations) and `eta` (asymptotic sampling efficiency) expose the
+run diagnostics.
+
+### Run control and stopping
+
+`run(f_live=0.01, n_shell=1, n_eff=10000, ...)` runs in two phases.
+**Exploration** adds likelihood batches and rebuilds bounds until the estimated
+fraction of the evidence still held by the live set falls to `f_live` (default
+0.01). **Refinement** then adds samples until every shell holds at least
+`n_shell` points and the total effective sample size reaches `n_eff` (default
+10 000). There is no `logzerr`: monitor `n_eff` instead.
+
+### Checkpointing
+
+`sampler.write(path)` stores a versioned HDF5 checkpoint (`.h5`/`.hdf5`);
+constructing the sampler with `filepath=path` and `resume=True` (the default)
+continues from it with the same RNG state, shell volumes and neural-network
+weights. Two kinds of run cannot be checkpointed and raise an explicit error:
+runs with likelihood blobs (blobs are not stored) and bounds trained with
+`neural_backend='reference'` (scikit-learn networks are not serialisable);
+re-run with the default `neural_backend='jax'` to enable checkpoints.
+
+### Runtime configuration and required callables
+
+Constructing a `NautilusSampler` enables JAX float64 (x64) mode and an on-disk
+compilation cache — process-global settings. The cache defaults to
+`~/.cache/nautilus_jax` (`$XDG_CACHE_HOME/nautilus_jax`); set
+`NAUTILUS_JAX_CACHE_DIR` to another directory, or to an empty string to disable
+it. Plain `import jnesty` and the Dynesty-style samplers touch neither setting.
+The engine's dependencies are optional (`pip install "jnesty[nautilus]"`), and
+both `prior_transform` and `loglikelihood` must be JAX-traceable: use
+`jax.numpy`, avoid in-place NumPy mutation, and let the likelihood return
+`log_l` or `(log_l, *blobs)`.
+
+### Choosing an engine
+
+The Dynesty-style samplers shrink the prior volume geometrically, replace one
+live point per iteration (discarding the other proposal work) and estimate the
+evidence with trapezoidal weights, quoting a `logzerr` derived from the
+information. The Nautilus engine instead fits nested bounds, retains every
+likelihood call and sums importance-weighted shell integrals, refining until
+the requested `n_eff` is reached. Pick Dynesty-style for the familiar dynesty
+API, error bars and dynamic allocation; pick Nautilus when likelihood calls are
+expensive enough that discarding them is wasteful, large weighted posterior
+samples are useful, and `n_eff` is a sufficient convergence diagnostic.

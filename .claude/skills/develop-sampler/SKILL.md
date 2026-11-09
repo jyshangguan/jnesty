@@ -146,14 +146,14 @@ SAMPLER_REGISTRY = {
 In `src/jnesty/sampler.py`, the sampler is currently hardcoded:
 
 ```python
-sampler_obj = get_sampler('rwalk', ndim, ...)  # line ~400
+sampler_obj = get_sampler('rwalk', ndim, ...)  # line ~553
 ```
 
 To make it configurable, add a `sampler` field to `WhileLoopNSConfig` and pass it through.
 
 ### 4. Wire into the user API
 
-In `src/jnesty/jnesty.py`, add a `sampler` parameter to `NestedSampler.__init__`:
+In `src/jnesty/dynesty_sampler.py`, add a `sampler` parameter to `NestedSampler.__init__`:
 
 ```python
 def __init__(self, ..., sampler='rwalk', ...):

@@ -65,3 +65,39 @@ class TestNestedSamplerAPI:
         s.print_summary()
         captured = capsys.readouterr()
         assert 'Log evidence' in captured.out
+
+
+@pytest.mark.slow
+class TestNautilusSamplerAPI:
+    """Real-engine coverage of the NautilusSampler adapter (JAX nautilus)."""
+
+    @pytest.fixture(autouse=True, scope='class')
+    @classmethod
+    def _engine_available(cls):
+        pytest.importorskip('jnesty.nautilus')
+
+    @staticmethod
+    def _make_sampler():
+        from jnesty import NautilusSampler
+        return NautilusSampler(
+            _loglik, _prior_transform, ndim=2, nlive=100, n_batch=50,
+            n_networks=0, seed=0, device='cpu')
+
+    def test_init_maps_to_native_engine(self):
+        sampler = self._make_sampler()
+        native = sampler.native_sampler
+        assert native.n_dim == 2
+        assert native.n_live == 100
+        assert native.prior is _prior_transform
+        assert native.likelihood is _loglik
+
+    def test_run_and_accuracy(self):
+        sampler = self._make_sampler()
+        assert sampler.run(f_live=0.2, n_eff=0) is True
+        assert abs(sampler.log_z - _logZ_analytical(2)) < 0.1
+
+        points, log_w, log_l = sampler.posterior()
+        assert len(points) == len(log_w) == len(log_l)
+        assert np.exp(log_w).sum() == pytest.approx(1.0, abs=1e-9)
+        assert sampler.n_like > 0
+        assert sampler.n_eff > 0

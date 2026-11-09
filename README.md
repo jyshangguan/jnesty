@@ -123,12 +123,21 @@ dependency). It keeps the native Nautilus semantics: nested
 neural-network shells, every likelihood evaluation kept, evidence and
 posterior weights from shell volumes. There is no `logzerr`; uncertainty is
 monitored through the effective sample size (`n_eff`). Runs can be
-checkpointed to HDF5 (`sampler.write(path)`) and resumed.
+checkpointed to HDF5 (`sampler.write(path)`) and resumed. See
+[doc/methods.md](doc/methods.md#importance-nested-sampling-nautilus) for the
+algorithm details.
 
 Note: constructing a `NautilusSampler` enables JAX float64 mode and an
 on-disk compilation cache (`~/.cache/nautilus_jax`); both are process-wide
 settings. Plain `import jnesty` and the Dynesty-style samplers are
 unaffected.
+
+### Engine comparison
+
+| Engine | Class | Run method | Results access | Uncertainty | Stopping |
+|--------|-------|------------|----------------|-------------|----------|
+| Dynesty-style | `NestedSampler`, `DynamicNestedSampler` | `run_nested()` | `sampler.results` dict (`logz`, `samples`, `logwt`, ...) | `logzerr` | remaining-evidence threshold `delta_logZ`; dynamic runs add batch/ESS targets |
+| Nautilus | `NautilusSampler` | `run(f_live=0.01, n_eff=10000)` | `posterior()` → `(points, log_w, log_l)`; `log_z`, `n_eff`, `n_like`, `eta` | `n_eff` (no `logzerr`) | exploration to `f_live`, then refinement to `n_shell` and `n_eff` |
 
 ### Saving and loading results
 
@@ -194,9 +203,12 @@ The `dev/demo/` folder contains complete comparison scripts against dynesty:
 | `02_rosenbrock_banana` | 2D Rosenbrock | Non-Gaussian correlated posterior |
 | `03_highd_gaussian` | 20D Gaussian | GPU scaling at high dimensions |
 | `04_gaussian_shells` | 2D Gaussian shells | Thin degenerate ring structures |
+| `01_multimodal_gaussian_mixture_nautilus` | 5D bimodal Gaussian | Nautilus engine variant: neural bounds, every likelihood call kept |
+| `02_rosenbrock_banana_nautilus` | 2D Rosenbrock | Nautilus engine variant of the correlated banana |
 
-Each demo has a JNesty variant (`*_jnesty.py`) and a dynesty variant
-(`*_dynesty.py`) for direct comparison.
+Each Dynesty-style demo has a JNesty variant (`*_jnesty.py`) and a dynesty
+variant (`*_dynesty.py`) for direct comparison; the two `*_nautilus.py`
+scripts run the same problems with the Nautilus engine.
 
 ## Acknowledgments
 
