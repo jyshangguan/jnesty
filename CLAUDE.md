@@ -22,7 +22,13 @@ Important files:
 
 ```text
 src/jnesty/__init__.py            # Public imports
-src/jnesty/jnesty.py              # Public NestedSampler API (thin wrapper)
+src/jnesty/dynesty_sampler.py     # NestedSampler + DynamicNestedSampler (public API)
+src/jnesty/nautilus_sampler.py    # NautilusSampler (public adapter; lazy engine import)
+src/jnesty/nautilus/              # OUR JAX Nautilus engine (JaxSampler, bounds, emulator)
+src/jnesty/jnesty.py               # Compatibility re-exports (static API)
+src/jnesty/dynamic.py             # Compatibility re-exports (dynamic API)
+src/jnesty/_dynamic.py            # Dynamic NS numerical helpers (no sampler classes)
+
 src/jnesty/sampler.py             # Core NS loop (delegates to Bound + InternalSampler)
 src/jnesty/internal_samplers.py   # Proposal strategies (RWalkSampler, future: SliceSampler)
 src/jnesty/bounding.py            # Bound base class + UnitCube, SingleEllipsoid, MultiEllipsoid
@@ -35,13 +41,29 @@ src/jnesty/plotting.py            # Dynesty-style plotting helpers
 Architecture follows Dynesty's separation of concerns:
 
 ```text
-NestedSampler (jnesty.py)            # User-facing API
+NestedSampler (dynesty_sampler.py)     # User-facing API
   └─> run_nested_sampling (sampler.py)  # Core NS loop (two-phase)
         │   Phase 1: uniform rejection sampling (sampler.py)
         │   Phase 2: random walk with adaptive bounds (sampler.py)
         ├─> Bound (bounding.py)           # Pluggable bounding methods
         └─> InternalSampler (internal_samplers.py)  # Pluggable proposal strategies
   └─> format_results (results.py)        # Raw result -> Results object
+
+DynamicNestedSampler (dynesty_sampler.py)  # Dynesty-style dynamic NS
+  └─> helpers in _dynamic.py                # Weights/stopping/combine (dynesty-faithful)
+
+NautilusSampler (nautilus_sampler.py)  # User-facing adapter (JNesty arg order)
+  └─> JaxSampler (nautilus/sampler.py) # OUR JAX Nautilus importance NS engine
+        ├─> JaxNautilusBound & friends (nautilus/bounds.py)
+        ├─> JaxEvaluator (nautilus/eval.py)
+        └─> Emulator (nautilus/neural.py)
+
+"Nautilus" always means OUR JAX implementation in `src/jnesty/nautilus/`; the
+external `nautilus-sampler` package is only a support dependency (optional
+`jnesty[nautilus]` extra) for reference fitting routines, the reference
+emulator, `Prior` compatibility and parity tests. Its CPU `Sampler` is never
+merged or re-exported. Constructing a `NautilusSampler` enables JAX float64
+mode process-wide (plain `import jnesty` does not).
 ```
 
 Sampling modes:
@@ -73,6 +95,7 @@ The current public-facing API is centered on:
 ```python
 from jnesty import NestedSampler, plotting
 from jnesty import save_results, load_results
+from jnesty import NautilusSampler  # optional jnesty[nautilus] extra
 ```
 
 ## Collaboration style

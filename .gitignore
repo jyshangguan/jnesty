@@ -114,6 +114,8 @@ cython_debug/
 .pypirc
 
 # JNesty specific
+develop/*
+/develop/
 output_*/
 task_*/
 *.npz

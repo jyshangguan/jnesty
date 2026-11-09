@@ -19,6 +19,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dynesty = ["dynesty", "corner", "astropy"]
+nautilus = [
+    "nautilus-sampler>=1.0.6,<1.1",
+    "optax>=0.1.7",
+    "scikit-learn>=0.22.0",
+    "threadpoolctl>=3.0.0",
+    "h5py>=3.0.0",
+]
 test = ["pytest"]
 
 [tool.pytest.ini_options]

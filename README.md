@@ -22,6 +22,9 @@ inferences).
   matching dynesty's `bound='multi'` implementation.
 - **Queue mode** — dynesty-style GPU parallelism where each candidate gets a
   full random walk and scale adapts at queue drain.
+- **JAX Nautilus engine** — our GPU port of the Nautilus importance nested
+  sampler: neural-network bounds, every likelihood call kept, and large
+  weighted posterior samples (optional `jnesty[nautilus]` extra).
 - **Dynesty result interop** — convert results to dynesty's `Results` object
   for use with its plotting utilities.
 
@@ -32,6 +35,12 @@ pip install -e .
 ```
 
 Requires JAX with GPU support (`jax[cuda12]` or similar).
+
+The JAX Nautilus engine needs optional dependencies:
+
+```bash
+pip install -e ".[nautilus]"
+```
 
 ## Documentation
 
@@ -89,6 +98,37 @@ sampler = NestedSampler(
 )
 sampler.run_nested()
 ```
+
+### Importance nested sampling with the Nautilus engine
+
+```python
+from jnesty import NautilusSampler
+
+sampler = NautilusSampler(
+    loglikelihood,
+    prior_transform,
+    ndim=5,
+    nlive=500,
+    n_networks=4,             # 0 disables the neural bounds
+    seed=0,
+)
+sampler.run(f_live=0.01, n_eff=10000)
+points, log_w, log_l = sampler.posterior()
+print(f"logZ = {sampler.log_z:.4f}  ESS = {sampler.n_eff:.0f}")
+```
+
+`NautilusSampler` wraps **our JAX port** of the Nautilus importance nested
+sampler (the external `nautilus-sampler` package is only a support
+dependency). It keeps the native Nautilus semantics: nested
+neural-network shells, every likelihood evaluation kept, evidence and
+posterior weights from shell volumes. There is no `logzerr`; uncertainty is
+monitored through the effective sample size (`n_eff`). Runs can be
+checkpointed to HDF5 (`sampler.write(path)`) and resumed.
+
+Note: constructing a `NautilusSampler` enables JAX float64 mode and an
+on-disk compilation cache (`~/.cache/nautilus_jax`); both are process-wide
+settings. Plain `import jnesty` and the Dynesty-style samplers are
+unaffected.
 
 ### Saving and loading results
 
@@ -160,7 +200,7 @@ Each demo has a JNesty variant (`*_jnesty.py`) and a dynesty variant
 
 ## Acknowledgments
 
-JNesty's sampling algorithms and bounding methods closely follow the [dynesty](https://github.com/joshspeagle/dynesty) nested sampling package. We are also inspired by [JAXNS](https://github.com/Joshuaalbert/jaxns) to use JAX to accelerate nested sampling on GPU. This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
+JNesty's sampling algorithms and bounding methods closely follow the [dynesty](https://github.com/joshspeagle/dynesty) nested sampling package. The Nautilus engine is our JAX port of the [nautilus](https://github.com/johannesulf/nautilus) importance nested sampler by Johannes U. Lange. We are also inspired by [JAXNS](https://github.com/Joshuaalbert/jaxns) to use JAX to accelerate nested sampling on GPU. This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
 
 ## License
 

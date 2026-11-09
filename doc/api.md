@@ -41,6 +41,81 @@
 .. autofunction:: jnesty.dynamic.combine_saved_and_new
 ```
 
+## NautilusSampler
+
+```{eval-rst}
+.. autoclass:: jnesty.NautilusSampler
+   :members:
+   :show-inheritance:
+```
+
+### JAX Nautilus Engine
+
+The engine behind :class:`jnesty.NautilusSampler`: our JAX port of the
+Nautilus importance nested sampler (the external `nautilus-sampler` package
+is only a support dependency and is not re-exported). Importing
+`jnesty.nautilus` enables JAX float64 mode and the engine's compilation
+cache; see `jnesty.nautilus._config`.
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxSampler
+   :members:
+   :show-inheritance:
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxEvaluator
+   :members:
+```
+
+#### Engine Bounds
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxUnitCube
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxEllipsoid
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxUnion
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxNeuralBound
+   :members:
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxNautilusBound
+   :members:
+```
+
+#### Neural Emulator
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.Emulator
+   :members:
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.nautilus.train_emulator
+```
+
+#### Checkpointing
+
+```{eval-rst}
+.. autofunction:: jnesty.nautilus.checkpoint.write_sampler
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.nautilus.checkpoint.read_sampler
+```
+
 ## Results
 
 ```{eval-rst}
