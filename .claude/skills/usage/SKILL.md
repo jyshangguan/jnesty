@@ -344,6 +344,22 @@ limit stopped the run early.
 **No `logzerr`**: Nautilus does not produce a Dynesty-style evidence error.
 Monitor `n_eff`, and re-seed to gauge run-to-run scatter.
 
+### Plotting nautilus results
+
+The shared plotting helpers work on Nautilus results through the
+Dynesty-compatible bridge:
+
+```python
+from jnesty import plotting
+
+res = sampler.to_results()          # or the cached snapshot sampler.results
+fig, axes = plotting.cornerplot(res)
+```
+
+`logzerr` is NaN (importance NS uses `n_eff` as the uncertainty proxy);
+`logvol` / `logz_trajectory` in the bridged view are derived quantities
+for plotting only, not re-derived evidence estimates.
+
 ### Checkpointing
 
 ```python
