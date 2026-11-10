@@ -19,7 +19,7 @@ Example:
     >>> print(f"logZ = {sampler.results['logz']:.4f}")
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import os as _os
 # JAX routes its C++-side log noise through absl; hide INFO/WARNING by
