@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from jax import random, lax
 from typing import Optional
 
-from .utils import call_with_context, randsphere
+from ..utils import call_with_context, randsphere
 
 
 def apply_reflect(u):

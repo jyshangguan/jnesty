@@ -42,12 +42,15 @@ import jnesty
 from jnesty import (NestedSampler, DynamicNestedSampler, NautilusSampler,
                    Results, save_results, load_results)
 
-# Historical deep imports keep working.
-from jnesty.jnesty import NestedSampler as legacy_static
-from jnesty.dynamic import (DynamicNestedSampler as legacy_dynamic, kish_ess,
-                           estimate_fresh_batch_size_from_memory,
-                           generate_fresh_batch_points)
-from jnesty.sampler import run_nested_sampling, WhileLoopNSConfig
+# Canonical deep imports.
+from jnesty.dynesty_sampler import NestedSampler as legacy_static
+from jnesty.dynesty_sampler import DynamicNestedSampler as legacy_dynamic
+from jnesty.dynesty._dynamic import (kish_ess,
+                                     estimate_fresh_batch_size_from_memory,
+                                     generate_fresh_batch_points)
+from jnesty.dynesty.core import run_nested_sampling, WhileLoopNSConfig
+import jnesty.dynesty.core as _core
+assert _core.run_nested_sampling is run_nested_sampling
 from jnesty.dynesty_sampler import NestedSampler as canonical
 
 assert jax.config.jax_enable_x64 is False

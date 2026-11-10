@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from jax import random
 
-from jnesty.internal_samplers import (
+from jnesty.dynesty.internal_samplers import (
     _propose_one, _single_walk, RWalkSampler, get_sampler,
 )
 

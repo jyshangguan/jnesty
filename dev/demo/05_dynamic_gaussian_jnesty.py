@@ -19,10 +19,12 @@ from pathlib import Path
 import numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Import jnesty before jax so the quiet JAX log defaults apply (README: JAX log noise).
+from jnesty import DynamicNestedSampler
+from jnesty.dynesty._dynamic import kish_ess
 import jax.numpy as jnp
 
-from jnesty import DynamicNestedSampler
-from jnesty.dynamic import kish_ess
 from dynesty import plotting as dyplot
 
 NDIM = 3

@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 import scipy.special as sp_special
-from jnesty import dynamic as jd
+from jnesty.dynesty import _dynamic as jd
 import dynesty.utils as du
 import dynesty.dynamicsampler as dds
 

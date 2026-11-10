@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from jax import random
 
-from jnesty.bounding import (
+from jnesty.dynesty.bounding import (
     UnitCube, SingleEllipsoid, MultiEllipsoidBound, get_bound,
 )
 

@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from jax import random, lax
 
 from .internal_samplers import RWalkSampler, _single_walk, vmap_queue_refill
-from .utils import call_with_context, logsubexp
+from ..utils import call_with_context, logsubexp
 
 # Import for progress tracking
 try:

@@ -5,9 +5,9 @@ description: Guide for adding a new internal sampler (proposal strategy) to JNes
 
 ## Architecture
 
-Internal samplers live in `src/jnesty/internal_samplers.py`. Each implements the `InternalSampler` interface and is registered in `SAMPLER_REGISTRY` for lookup by string name.
+Internal samplers live in `jnesty/dynesty/internal_samplers.py`. Each implements the `InternalSampler` interface and is registered in `SAMPLER_REGISTRY` for lookup by string name.
 
-The core NS loop in `src/jnesty/sampler.py` calls `sampler_obj.sample()` to propose replacement live points and `sampler_obj.tune()` to adapt the proposal scale.
+The core NS loop in `jnesty/dynesty/core.py` calls `sampler_obj.sample()` to propose replacement live points and `sampler_obj.tune()` to adapt the proposal scale.
 
 There is also a standalone `vmap_queue_refill()` function for Dynesty-style queue mode that generates multiple candidates in parallel outside of any sampler object.
 
@@ -112,7 +112,7 @@ Uses `ncdim` (clustered dimensions) not full `ndim`, matching Dynesty.
 
 ### 1. Implement the class
 
-Add your class to `src/jnesty/internal_samplers.py`:
+Add your class to `jnesty/dynesty/internal_samplers.py`:
 
 ```python
 class SliceSampler(InternalSampler):
@@ -143,7 +143,7 @@ SAMPLER_REGISTRY = {
 
 ### 3. Wire into the core loop
 
-In `src/jnesty/sampler.py`, the sampler is currently hardcoded:
+In `jnesty/dynesty/core.py`, the sampler is currently hardcoded:
 
 ```python
 sampler_obj = get_sampler('rwalk', ndim, ...)  # line ~553
@@ -153,7 +153,7 @@ To make it configurable, add a `sampler` field to `WhileLoopNSConfig` and pass i
 
 ### 4. Wire into the user API
 
-In `src/jnesty/dynesty_sampler.py`, add a `sampler` parameter to `NestedSampler.__init__`:
+In `jnesty/dynesty_sampler.py`, add a `sampler` parameter to `NestedSampler.__init__`:
 
 ```python
 def __init__(self, ..., sampler='rwalk', ...):
@@ -165,7 +165,7 @@ If the sampler should work with queue mode, you may need a queue-refill function
 
 ### 6. Test
 
-1. `python -m py_compile src/jnesty/internal_samplers.py`
+1. `python -m py_compile jnesty/dynesty/internal_samplers.py`
 2. Run a demo with the new sampler
 3. Compare logZ with Dynesty's equivalent sampler (if available)
 

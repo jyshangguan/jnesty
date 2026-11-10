@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from jax import random
 
-from jnesty.internal_samplers import vmap_queue_refill
+from jnesty.dynesty.internal_samplers import vmap_queue_refill
 
 
 def _loglik_gaussian(x):

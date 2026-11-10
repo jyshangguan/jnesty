@@ -21,11 +21,20 @@ Example:
 
 __version__ = "0.1.0"
 
+import os as _os
+# JAX routes its C++-side log noise through absl; hide INFO/WARNING by
+# default. setdefault: a value exported by the user wins, so debugging
+# logs come back with e.g.  ABSL_MIN_LOG_LEVEL=0 python script.py
+_os.environ.setdefault('ABSL_MIN_LOG_LEVEL', '3')
+_os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
+del _os
+
 from .dynesty_sampler import (NestedSampler, DynamicNestedSampler,
                                DEFAULT_QUEUE_SIZE, LEGACY_STEPS_PER_WALK,
                                auto_queue_size)
 from .nautilus_sampler import NautilusSampler
-from .sampler import run_nested_sampling, WhileLoopNSConfig, WhileLoopNSResult
+from .dynesty.core import (run_nested_sampling, WhileLoopNSConfig,
+                           WhileLoopNSResult)
 from .results import Results, save_results, load_results
 from . import plotting
 

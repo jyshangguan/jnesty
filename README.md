@@ -102,7 +102,7 @@ sampler.run_nested()
 ### Importance nested sampling with the Nautilus engine
 
 ```python
-from jnesty import NautilusSampler
+from jnesty import NautilusSampler, plotting
 
 sampler = NautilusSampler(
     loglikelihood,
@@ -115,6 +115,10 @@ sampler = NautilusSampler(
 sampler.run(f_live=0.01, n_eff=10000)
 points, log_w, log_l = sampler.posterior()
 print(f"logZ = {sampler.log_z:.4f}  ESS = {sampler.n_eff:.0f}")
+
+# Dynesty-compatible view of the same run (cached: sampler.results)
+res = sampler.to_results()
+fig, axes = plotting.cornerplot(res)
 ```
 
 `NautilusSampler` wraps **our JAX port** of the Nautilus importance nested
@@ -126,6 +130,10 @@ monitored through the effective sample size (`n_eff`). Runs can be
 checkpointed to HDF5 (`sampler.write(path)`) and resumed. See
 [doc/methods.md](doc/methods.md#importance-nested-sampling-nautilus) for the
 algorithm details.
+
+The `to_results()` bridge reuses the shared plotting: `logzerr` is `nan`
+(importance NS uses `n_eff` as the uncertainty proxy), while `logvol` and
+`logz_trajectory` are derived quantities for plotting only.
 
 Note: constructing a `NautilusSampler` enables JAX float64 mode and an
 on-disk compilation cache (`~/.cache/nautilus_jax`); both are process-wide
@@ -156,6 +164,34 @@ sampler.plot_run()
 sampler.plot_trace()
 sampler.plot_corner()
 ```
+
+### JAX log noise
+
+Importing `jnesty` sets `ABSL_MIN_LOG_LEVEL` and `TF_CPP_MIN_LOG_LEVEL` to
+`3` via `os.environ.setdefault` before JAX is imported, so absl/XLA INFO and
+WARNING messages are hidden by default. This includes the frequent and
+harmless
+
+    W1110 18:45:45.731838 3694514 pjrt_executable.cc:642] Assume version
+    compatibility. PjRt-IFRT does not track XLA executable versions.
+
+that XLA prints whenever an executable is loaded from the persistent
+compilation cache (the Nautilus engine enables that cache). To see the logs
+again, export a lower level before running:
+
+```bash
+ABSL_MIN_LOG_LEVEL=0 python your_script.py
+```
+
+`0` is INFO, `1` WARNING, `2` ERROR, `3` FATAL. Because `setdefault` is
+used, a value you already exported always wins.
+
+**Import order matters:** the defaults only take effect if `import jnasty`
+runs before the first `import jax` — the C++ log threshold is read when
+jaxlib loads and cannot be changed afterwards. Scripts that must import
+`jax` first (e.g. a jax-centric module that imports `jnasty` lazily) should
+export `TF_CPP_MIN_LOG_LEVEL=3` (and `ABSL_MIN_LOG_LEVEL=3`) in the shell
+instead.
 
 ## How It Works
 
@@ -192,6 +228,30 @@ cores. The random walk phase supports two GPU parallelism modes:
 **batch mode** (split `rwalk_K` steps across multiple independent walks) and
 **queue mode** (dynesty-style batch queue where each candidate gets full
 `rwalk_K` steps).
+
+## Repository layout
+
+The package directory sits at the repository root — flat like the upstream
+`dynesty` and `nautilus-sampler` packages — and is installed editable via
+`pip install -e .` (`pyproject.toml`: `[tool.setuptools.packages.find]
+where = ["."]`). There is no `src/` directory.
+
+```text
+jnesty/
+    __init__.py            # public API + JAX log-noise defaults
+    dynesty_sampler.py     # public dynesty-style classes   (twins: one public
+    nautilus_sampler.py    # public Nautilus adapter         module per engine)
+    dynesty/               # dynesty-style engine              (peers: one engine
+    nautilus/              # JAX Nautilus engine               subpackage each)
+    utils.py               # shared helpers (single _convert_to_numpy, ...)
+    results.py             # shared Results + format_nautilus_results bridge
+    plotting.py            # shared plotting for BOTH engines
+```
+
+Each sampler family has the same structure: one public adapter module
+(`dynesty_sampler.py`, `nautilus_sampler.py`) plus one engine subpackage
+(`dynesty/`, `nautilus/`). `utils.py`, `results.py` and `plotting.py` are
+engine-agnostic and shared by both engines.
 
 ## More Examples
 

@@ -22,23 +22,23 @@
 ### Dynamic Module Functions
 
 ```{eval-rst}
-.. autofunction:: jnesty.dynamic.compute_integrals
+.. autofunction:: jnesty.dynesty._dynamic.compute_integrals
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.dynamic.kish_ess
+.. autofunction:: jnesty.dynesty._dynamic.kish_ess
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.dynamic.weight_function
+.. autofunction:: jnesty.dynesty._dynamic.weight_function
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.dynamic.stopping_function
+.. autofunction:: jnesty.dynesty._dynamic.stopping_function
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.dynamic.combine_saved_and_new
+.. autofunction:: jnesty.dynesty._dynamic.combine_saved_and_new
 ```
 
 ## NautilusSampler
@@ -128,6 +128,10 @@ cache; see `jnesty.nautilus._config`.
 .. autofunction:: jnesty.results.format_results
 ```
 
+```{eval-rst}
+.. autofunction:: jnesty.results.format_nautilus_results
+```
+
 ### FITS I/O
 
 ```{eval-rst}
@@ -141,7 +145,8 @@ cache; see `jnesty.nautilus._config`.
 ## Plotting
 
 All plotting functions accept a results dict (or `Results` object) as the
-first argument and return `(fig, axes)`.
+first argument and return `(fig, axes)`. For a `NautilusSampler` run, pass
+`sampler.to_results()` (the same cached object as `sampler.results`).
 
 ```{eval-rst}
 .. autofunction:: jnesty.runplot
@@ -164,6 +169,11 @@ first argument and return `(fig, axes)`.
 ```
 
 ## Core Sampling Loop
+
+The core loop and its pluggable pieces live in the `jnesty.dynesty` engine
+subpackage: `core`, `internal_samplers`, `bounding`, `multi_ellipsoid` and
+`_dynamic`. The public classes in `jnesty.dynesty_sampler` are thin wrappers
+around it.
 
 ### Configuration
 
@@ -188,61 +198,61 @@ first argument and return `(fig, axes)`.
 ### Memory Estimation
 
 ```{eval-rst}
-.. autofunction:: jnesty.sampler.estimate_batch_size_from_memory
+.. autofunction:: jnesty.dynesty.core.estimate_batch_size_from_memory
 ```
 
 ## Bounding Methods
 
 ```{eval-rst}
-.. autoclass:: jnesty.bounding.Bound
+.. autoclass:: jnesty.dynesty.bounding.Bound
    :members:
    :show-inheritance:
 ```
 
 ```{eval-rst}
-.. autoclass:: jnesty.bounding.UnitCube
+.. autoclass:: jnesty.dynesty.bounding.UnitCube
    :members:
    :show-inheritance:
 ```
 
 ```{eval-rst}
-.. autoclass:: jnesty.bounding.SingleEllipsoid
+.. autoclass:: jnesty.dynesty.bounding.SingleEllipsoid
    :members:
    :show-inheritance:
 ```
 
 ```{eval-rst}
-.. autoclass:: jnesty.bounding.MultiEllipsoidBound
+.. autoclass:: jnesty.dynesty.bounding.MultiEllipsoidBound
    :members:
    :show-inheritance:
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.bounding.get_bound
+.. autofunction:: jnesty.dynesty.bounding.get_bound
 ```
 
 ## Internal Samplers
 
 ```{eval-rst}
-.. autoclass:: jnesty.internal_samplers.InternalSampler
+.. autoclass:: jnesty.dynesty.internal_samplers.InternalSampler
    :members:
    :show-inheritance:
 ```
 
 ```{eval-rst}
-.. autoclass:: jnesty.internal_samplers.RWalkSampler
+.. autoclass:: jnesty.dynesty.internal_samplers.RWalkSampler
    :members:
    :show-inheritance:
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.internal_samplers.get_sampler
+.. autofunction:: jnesty.dynesty.internal_samplers.get_sampler
 ```
 
 ### Queue Mode
 
 ```{eval-rst}
-.. autofunction:: jnesty.internal_samplers.vmap_queue_refill
+.. autofunction:: jnesty.dynesty.internal_samplers.vmap_queue_refill
 ```
 
 ## Utilities
@@ -266,25 +276,25 @@ first argument and return `(fig, axes)`.
 ## Multi-Ellipsoid Fitting
 
 ```{eval-rst}
-.. autofunction:: jnesty.multi_ellipsoid.fit_multi_ellipsoid
+.. autofunction:: jnesty.dynesty.multi_ellipsoid.fit_multi_ellipsoid
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.multi_ellipsoid.fit_bounding_ellipsoid
+.. autofunction:: jnesty.dynesty.multi_ellipsoid.fit_bounding_ellipsoid
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.multi_ellipsoid.get_axes_for_rwalk
+.. autofunction:: jnesty.dynesty.multi_ellipsoid.get_axes_for_rwalk
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.multi_ellipsoid.sample_from_union
+.. autofunction:: jnesty.dynesty.multi_ellipsoid.sample_from_union
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.multi_ellipsoid.contains
+.. autofunction:: jnesty.dynesty.multi_ellipsoid.contains
 ```
 
 ```{eval-rst}
-.. autofunction:: jnesty.multi_ellipsoid.contains_all
+.. autofunction:: jnesty.dynesty.multi_ellipsoid.contains_all
 ```

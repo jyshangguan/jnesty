@@ -1,5 +1,5 @@
 import pytest
-from jnesty.sampler import WhileLoopNSConfig, WhileLoopNSResult
+from jnesty.dynesty.core import WhileLoopNSConfig, WhileLoopNSResult
 
 
 class TestWhileLoopNSConfig:

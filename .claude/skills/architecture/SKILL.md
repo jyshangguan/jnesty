@@ -6,32 +6,38 @@ description: JNesty code architecture — modules, data flow, key data structure
 ## Module Map
 
 ```
-src/jnesty/
-├── __init__.py            # Public exports (NestedSampler, DynamicNestedSampler, NautilusSampler, ...)
+jnesty/
+├── __init__.py            # Public exports + JAX/absl log-noise defaults
 ├── dynesty_sampler.py     # NestedSampler + DynamicNestedSampler (Dynesty-style public API)
 ├── nautilus_sampler.py    # NautilusSampler (public adapter; lazy engine import)
+├── dynesty/               # dynesty ENGINE subpackage (peer of nautilus/; see below)
 ├── nautilus/              # OUR JAX Nautilus engine (JaxSampler, bounds, evaluator, emulator)
-├── jnesty.py              # Compatibility shim: re-exports the static API (filename = package name)
-├── dynamic.py             # Compatibility shim: re-exports DynamicNestedSampler + _dynamic helpers
-├── _dynamic.py            # Dynamic-NS numerical helpers (no sampler classes)
-├── sampler.py             # Core NS loop (run_nested_sampling, two-phase)
-├── internal_samplers.py   # Proposal strategies (InternalSampler + RWalkSampler + vmap_queue_refill)
-├── bounding.py            # Dynesty-style bounding (Bound + UnitCube/Single/Multi)
-├── multi_ellipsoid.py     # JIT-compiled multi-ellipsoid fitting
-├── results.py             # Results class + format_results() + FITS I/O
-├── plotting.py            # Dynesty-style plotting (built-in, no dynesty dependency)
-└── utils.py               # Shared utilities (randsphere, logsubexp, mean_and_cov)
+├── utils.py               # SHARED helpers (single home of _convert_to_numpy, randsphere, ...)
+├── results.py             # SHARED: Results + format_results + format_nautilus_results
+├── plotting.py            # SHARED plotting for BOTH engines (no dynesty dependency)
 ```
 
-`src/jnesty/jnesty.py` and `src/jnesty/dynamic.py` are **compatibility shims only**
-(historical imports such as `from jnesty.jnesty import NestedSampler` must keep
-working). Note that the static shim's filename equals the package name; never
-confuse `src/jnesty/jnesty.py` (shim) with `src/jnesty/` (the package root).
+Each sampler family has the same structure: one public adapter module plus one
+engine subpackage — `dynesty_sampler.py` ↔ `nautilus_sampler.py` and
+`dynesty/` ↔ `nautilus/`. `utils.py`, `results.py` and `plotting.py` are
+engine-agnostic shared infrastructure.
+
+### Dynesty engine subpackage
+
+```
+jnesty/dynesty/
+├── __init__.py          # Engine exports (run_nested_sampling, BOUND_REGISTRY, SAMPLER_REGISTRY)
+├── core.py              # Core NS loop (run_nested_sampling, two-phase) — formerly sampler.py
+├── internal_samplers.py # Proposal strategies (InternalSampler + RWalkSampler + vmap_queue_refill)
+├── bounding.py          # Dynesty-style bounding (Bound + UnitCube/Single/Multi)
+├── multi_ellipsoid.py   # JIT-compiled multi-ellipsoid fitting
+└── _dynamic.py          # Dynamic-NS numerical helpers (no sampler classes)
+```
 
 ### Nautilus engine subpackage
 
 ```
-src/jnesty/nautilus/
+jnesty/nautilus/
 ├── __init__.py        # Engine exports; initialize_runtime() on import (x64 + compilation cache)
 ├── sampler.py         # JaxSampler (nested neural-network shells)
 ├── bounds.py          # JaxNautilusBound, JaxUnion, JaxNeuralBound, JaxEllipsoid,
@@ -47,7 +53,7 @@ src/jnesty/nautilus/
 └── _config.py         # initialize_runtime(): x64 + on-disk compilation cache (idempotent)
 ```
 
-"Nautilus" always means OUR JAX implementation in `src/jnesty/nautilus/`. The
+"Nautilus" always means OUR JAX implementation in `jnesty/nautilus/`. The
 external `nautilus-sampler` package is a support dependency (optional
 `jnesty[nautilus]` extra) used for upstream fitting helpers, the reference
 emulator, `Prior` compatibility and parity tests — its CPU `Sampler` is never
@@ -64,7 +70,7 @@ NestedSampler (dynesty_sampler.py) ← Dynesty-style public API
   │  run_nested(): build config, call core loop, format results
   │
   ▼
-run_nested_sampling (sampler.py)   ← Core NS loop (two-phase)
+run_nested_sampling (dynesty/core.py)   ← Core NS loop (two-phase)
   │
   │  Phase 1: Uniform rejection sampling
   │  │  _run_uniform_phase() with lax.while_loop
@@ -102,7 +108,7 @@ Results object                      ← Dict wrapper with attribute access
      save_results() / load_results() for FITS I/O
 
 DynamicNestedSampler (dynesty_sampler.py)  ← Dynesty-style dynamic NS
-  └─> helpers in _dynamic.py               ← Weights/stopping/combine (dynesty-faithful)
+  └─> helpers in dynesty/_dynamic.py        ← Weights/stopping/combine (dynesty-faithful)
 
 NautilusSampler (nautilus_sampler.py)      ← Separate importance-NS engine
   │  JNesty argument order: (loglikelihood, prior_transform, ndim, ...)
@@ -115,11 +121,13 @@ JaxSampler (nautilus/sampler.py)           ← OUR JAX Nautilus engine
   ├─> Emulator / train_emulator (nautilus/neural.py)   # optax-trained networks
   └─> checkpoint.py (HDF5 write/resume via filepath= / sampler.write())
   → posterior() → (points, log_w, log_l); log_z / n_eff / n_like / eta properties
+  → to_results() / cached results property → format_nautilus_results (results.py)
+    dynesty-compatible view, so the shared plotting works on nautilus runs
 ```
 
 ## Key Data Structures
 
-### WhileLoopNSConfig (sampler.py)
+### WhileLoopNSConfig (dynesty/core.py)
 
 NamedTuple carrying all run configuration:
 
@@ -146,7 +154,7 @@ class WhileLoopNSConfig(NamedTuple):
     min_ncall: int = None             # min calls before phase switch (default 2*nlive)
 ```
 
-### WhileLoopNSResult (sampler.py)
+### WhileLoopNSResult (dynesty/core.py)
 
 Raw output from the NS loop:
 
@@ -167,7 +175,7 @@ class WhileLoopNSResult(NamedTuple):
     live_logL: jnp.ndarray = None # (nlive,) final live log-likelihoods
 ```
 
-### MultiEllipsoidState (multi_ellipsoid.py)
+### MultiEllipsoidState (dynesty/multi_ellipsoid.py)
 
 Fixed-size array container for multi-ellipsoid decomposition:
 
@@ -256,7 +264,7 @@ Throttled to every 100 iterations to avoid overhead. Uses `pbar.write()` for bou
 final_state, _ = lax.scan(walk_step, init_state, jnp.arange(n_steps))
 ```
 
-Used in `_single_walk()` (internal_samplers.py) for each individual random walk.
+Used in `_single_walk()` (dynesty/internal_samplers.py) for each individual random walk.
 
 ### jax.vmap for parallel operations
 
@@ -281,7 +289,7 @@ logL_batch = vmapped_loglike(u_batch)  # unit_cube_batch_size evaluations
 ### Compile-time memory estimation for batch capping
 
 ```python
-# In sampler.py: estimate_batch_size_from_memory()
+# In dynesty/core.py: estimate_batch_size_from_memory()
 trial_fn = jax.vmap(lambda wk: _single_walk(...))
 compiled = jax.jit(trial_fn).lower(trial_keys).compile()
 peak = compiled.memory_analysis().peak_memory_in_bytes
@@ -305,11 +313,11 @@ Wraps the walk section to guarantee every NS iteration produces a valid replacem
 Samplers and bounds use string-based lookup:
 
 ```python
-# internal_samplers.py
+# dynesty/internal_samplers.py
 SAMPLER_REGISTRY = {'rwalk': RWalkSampler}
 sampler = get_sampler('rwalk', ndim, target_acceptance=0.5, batch_size=..., ncdim=...)
 
-# bounding.py
+# dynesty/bounding.py
 BOUND_REGISTRY = {'none': UnitCube, 'single': SingleEllipsoid, 'multi': MultiEllipsoidBound}
 bound = get_bound('multi', ndim, max_ellipsoids=20)
 ```
@@ -359,9 +367,11 @@ Output goes to `output_0X_jnesty/` or `output_0X_dynesty/` with FITS results and
 tests/
 ├── unit/
 │   ├── test_bounding.py            # UnitCube, SingleEllipsoid, MultiEllipsoid
-│   ├── test_dynamic_faithful.py    # _dynamic.py helpers vs Dynesty formulas
+│   ├── test_dynamic_faithful.py    # dynesty/_dynamic.py helpers vs Dynesty formulas
 │   ├── test_internal_samplers.py   # RWalkSampler, _single_walk, apply_reflect
+│   ├── test_logging_defaults.py    # JAX/absl log-level env defaults (slow)
 │   ├── test_multi_ellipsoid.py     # Multi-ellipsoid fitting
+│   ├── test_nautilus_results_bridge.py  # format_nautilus_results / to_results()
 │   ├── test_plotting.py            # Plotting functions
 │   ├── test_queue_mode.py          # Queue mode behavior
 │   ├── test_results.py             # Results formatting, FITS I/O
@@ -369,7 +379,7 @@ tests/
 │   └── test_utils.py               # Utility functions
 ├── integration/
 │   ├── test_dynamic.py             # DynamicNestedSampler integration
-│   ├── test_jnesty_api.py          # API compatibility (incl. shims)
+│   ├── test_jnesty_api.py          # API compatibility
 │   ├── test_queue_and_defaults.py  # Queue mode + auto-defaults
 │   └── test_sampler.py             # Full NS loop integration
 └── nautilus/                       # JAX Nautilus engine + adapter tests

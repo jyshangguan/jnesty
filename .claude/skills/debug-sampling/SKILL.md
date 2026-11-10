@@ -19,7 +19,7 @@ Nautilus first**.
   `nautilus-sampler` package (importable as `nautilus`). Run the same problem
   with the same `n_live` / `f_live` / `n_eff` there and compare `log_z`,
   `n_like` and the posterior marginals. If upstream agrees with theory and
-  `JaxSampler` does not, the bug is in our engine (`src/jnesty/nautilus/`).
+  `JaxSampler` does not, the bug is in our engine (`jnesty/nautilus/`).
 - The separate `develop/` tree (vendored at commit `7de6eb1`) contains the
   reference `nautilus` sources next to the JAX port they seeded, and serves as
   the parity oracle. Treat it as read-only: **never modify `develop/`**, never
@@ -257,11 +257,11 @@ Scale adapts only at queue drain in queue mode. If `queue_size` is very large, a
 
 ```bash
 # Syntax check after code changes
-python -m py_compile src/jnesty/dynesty_sampler.py
-python -m py_compile src/jnesty/internal_samplers.py
-python -m py_compile src/jnesty/bounding.py
-python -m py_compile src/jnesty/sampler.py
-python -m py_compile src/jnesty/nautilus/sampler.py
+python -m py_compile jnesty/dynesty_sampler.py
+python -m py_compile jnesty/dynesty/internal_samplers.py
+python -m py_compile jnesty/dynesty/bounding.py
+python -m py_compile jnesty/dynesty/core.py
+python -m py_compile jnesty/nautilus/sampler.py
 
 # Run unit tests
 pytest tests/unit/test_queue_mode.py -v

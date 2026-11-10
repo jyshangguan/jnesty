@@ -25,6 +25,8 @@ import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union
 import warnings
 
+from .utils import _convert_to_numpy
+
 
 # Optional dependencies
 try:
@@ -45,28 +47,6 @@ except ImportError:
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-def _convert_to_numpy(arr: Any) -> np.ndarray:
-    """
-    Convert JAX arrays or other array-like to numpy arrays for plotting.
-
-    Parameters
-    ----------
-    arr : array-like
-        Input array (could be DeviceArray, numpy array, list, etc.)
-
-    Returns
-    -------
-    np.ndarray
-        Numpy array suitable for plotting.
-    """
-    if hasattr(arr, '__array__'):
-        return np.array(arr)
-    elif isinstance(arr, np.ndarray):
-        return arr
-    else:
-        return np.asarray(arr)
-
 
 def _get_weights(results: Dict[str, Any]) -> Optional[np.ndarray]:
     """

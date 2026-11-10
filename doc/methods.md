@@ -210,7 +210,7 @@ Key parameters:
 
 `NautilusSampler` exposes importance nested sampling. It is our JAX/GPU port
 of the Nautilus algorithm, implemented by `jnesty.nautilus.JaxSampler` (see
-`src/jnesty/nautilus/`); the external `nautilus-sampler` package is only a
+`jnesty/nautilus/`); the external `nautilus-sampler` package is only a
 support dependency (reference fitting routines, the reference emulator,
 `Prior` compatibility and parity tests), never the CPU `Sampler` itself. The
 port keeps the algorithm and moves the numeric work — likelihood and prior

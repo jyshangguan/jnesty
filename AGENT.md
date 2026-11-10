@@ -9,56 +9,72 @@ This repository develops **JNesty**, a JAX-based nested sampling package with GP
 Repository path:
 
 ```text
-/home/shangguan/Softwares/my_modules/JNesty
+/home/shangguan/Softwares/my_modules/jnesty
 ```
 
 Main development target:
 
 ```text
-src/jnesty/
+jnesty/
 ```
 
 Important files:
 
 ```text
-src/jnesty/__init__.py            # Public imports
-src/jnesty/dynesty_sampler.py     # NestedSampler + DynamicNestedSampler (public API)
-src/jnesty/nautilus_sampler.py    # NautilusSampler (public adapter; lazy engine import)
-src/jnesty/nautilus/              # OUR JAX Nautilus engine (JaxSampler, bounds, emulator)
-src/jnesty/jnesty.py               # Compatibility re-exports (static API)
-src/jnesty/dynamic.py             # Compatibility re-exports (dynamic API)
-src/jnesty/_dynamic.py            # Dynamic NS numerical helpers (no sampler classes)
+jnesty/__init__.py                  # Public imports + JAX/absl log-noise defaults
+jnesty/dynesty_sampler.py           # Public dynesty classes (NestedSampler, DynamicNestedSampler)
+jnesty/nautilus_sampler.py          # Public Nautilus adapter (lazy engine import)
 
-src/jnesty/sampler.py             # Core NS loop (delegates to Bound + InternalSampler)
-src/jnesty/internal_samplers.py   # Proposal strategies (RWalkSampler, future: SliceSampler)
-src/jnesty/bounding.py            # Bound base class + UnitCube, SingleEllipsoid, MultiEllipsoid
-src/jnesty/multi_ellipsoid.py     # JIT-compiled multi-ellipsoid fitting core
-src/jnesty/results.py             # Results class + format_results()
-src/jnesty/utils.py               # Shared utilities (randsphere, logsubexp, etc.)
-src/jnesty/plotting.py            # Dynesty-style plotting helpers
+jnesty/dynesty/                     # dynesty ENGINE subpackage (peer of nautilus/)
+jnesty/dynesty/core.py              # Core NS loop (delegates to Bound + InternalSampler)
+jnesty/dynesty/internal_samplers.py # Proposal strategies (RWalkSampler, future: SliceSampler)
+jnesty/dynesty/bounding.py          # Bound base + UnitCube, SingleEllipsoid, MultiEllipsoid
+jnesty/dynesty/multi_ellipsoid.py   # JIT-compiled multi-ellipsoid fitting core
+jnesty/dynesty/_dynamic.py          # Dynamic NS numerical helpers (no sampler classes)
+
+jnesty/nautilus/                    # OUR JAX Nautilus engine (JaxSampler, bounds, emulator)
+jnesty/utils.py                     # SHARED helpers (single home of _convert_to_numpy)
+jnesty/results.py                   # SHARED Results + format_results + format_nautilus_results
+jnesty/plotting.py                  # SHARED plotting for BOTH engines
 ```
+
+Flat layout: the package lives at the repository root (`jnesty/`) — the same
+layout as the upstream `dynesty` and `nautilus-sampler` packages — and is
+installed editable (`pip install -e .`, `[tool.setuptools.packages.find]
+where = ["."]`). No `src/` directory is involved.
+
+Log noise defaults: importing the package sets `ABSL_MIN_LOG_LEVEL` and
+`TF_CPP_MIN_LOG_LEVEL` to `'3'` via `os.environ.setdefault` before the first
+JAX-importing submodule, hiding absl INFO/WARNING noise. A user-exported value
+wins: debug with `ABSL_MIN_LOG_LEVEL=0 python script.py` (0=INFO, 1=WARNING,
+2=ERROR, 3=FATAL). It applies only if the package is imported before JAX
+initializes absl. Import order matters: the defaults apply only when jnasty is
+imported before jax (the C++ threshold is fixed when jaxlib loads); scripts that
+must import jax first should export TF_CPP_MIN_LOG_LEVEL=3 themselves.
 
 Architecture follows Dynesty's separation of concerns:
 
 ```text
-NestedSampler (dynesty_sampler.py)     # User-facing API
-  └─> run_nested_sampling (sampler.py)  # Core NS loop (two-phase)
-        │   Phase 1: uniform rejection sampling (sampler.py)
-        │   Phase 2: random walk with adaptive bounds (sampler.py)
-        ├─> Bound (bounding.py)           # Pluggable bounding methods
-        └─> InternalSampler (internal_samplers.py)  # Pluggable proposal strategies
-  └─> format_results (results.py)        # Raw result -> Results object
+NestedSampler (dynesty_sampler.py)          # User-facing API
+  └─> run_nested_sampling (dynesty/core.py) # Core NS loop (two-phase)
+        │   Phase 1: uniform rejection sampling (dynesty/core.py)
+        │   Phase 2: random walk with adaptive bounds (dynesty/core.py)
+        ├─> Bound (dynesty/bounding.py)     # Pluggable bounding methods
+        └─> InternalSampler (dynesty/internal_samplers.py)  # Proposal strategies
+  └─> format_results (results.py)           # Raw result -> Results object
 
-DynamicNestedSampler (dynesty_sampler.py)  # Dynesty-style dynamic NS
-  └─> helpers in _dynamic.py                # Weights/stopping/combine (dynesty-faithful)
+DynamicNestedSampler (dynesty_sampler.py)   # Dynesty-style dynamic NS
+  └─> helpers in dynesty/_dynamic.py        # Weights/stopping/combine (dynesty-faithful)
 
 NautilusSampler (nautilus_sampler.py)  # User-facing adapter (JNesty arg order)
   └─> JaxSampler (nautilus/sampler.py) # OUR JAX Nautilus importance NS engine
         ├─> JaxNautilusBound & friends (nautilus/bounds.py)
         ├─> JaxEvaluator (nautilus/eval.py)
         └─> Emulator (nautilus/neural.py)
+  └─> to_results() / results -> format_nautilus_results (results.py)
+                                       # Plotting bridge for the shared plotting
 
-"Nautilus" always means OUR JAX implementation in `src/jnesty/nautilus/`; the
+"Nautilus" always means OUR JAX implementation in `jnesty/nautilus/`; the
 external `nautilus-sampler` package is only a support dependency (optional
 `jnesty[nautilus]` extra) for reference fitting routines, the reference
 emulator, `Prior` compatibility and parity tests. Its CPU `Sampler` is never
@@ -177,9 +193,9 @@ Use explicit paths and literal arguments.
 Good:
 
 ```bash
-cd /home/shangguan/Softwares/my_modules/JNesty
+cd /home/shangguan/Softwares/my_modules/jnesty
 python dev/demo/test_plotting.py
-python -m py_compile src/jnesty/api.py
+python -m py_compile jnesty/dynesty/core.py
 git status
 git diff --stat
 git log --oneline -5
@@ -200,8 +216,8 @@ $(...)
 Avoid commands like:
 
 ```bash
-cd ~/Softwares/my_modules/JNesty
-PYTHONPATH=$PWD/src:$PYTHONPATH python dev/demo/test_plotting.py
+cd ~/Softwares/my_modules/jnesty
+PYTHONPATH=$PWD:$PYTHONPATH python dev/demo/test_plotting.py
 python *.py
 ```
 
@@ -262,9 +278,9 @@ After code changes, run the smallest meaningful check first.
 Examples:
 
 ```bash
-python -m py_compile src/jnesty/sampler.py
-python -m py_compile src/jnesty/internal_samplers.py
-python -m py_compile src/jnesty/jnesty.py
+python -m py_compile jnesty/dynesty/core.py
+python -m py_compile jnesty/dynesty/internal_samplers.py
+python -m py_compile jnesty/dynesty/_dynamic.py
 pytest tests/integration/test_queue_and_defaults.py
 ```
 
@@ -451,7 +467,9 @@ results = {
 
 Convert JAX arrays to NumPy before plotting with Matplotlib.
 
-Use a helper like:
+`_convert_to_numpy` has a single definition in `jnesty/utils.py`;
+`results.py` and `plotting.py` import it from there (do not re-define it).
+The logic is:
 
 ```python
 def _convert_to_numpy(arr):

@@ -4,7 +4,7 @@ import pytest
 from jax import random
 from math import erf, sqrt, log, pi
 
-from jnesty.sampler import run_nested_sampling, WhileLoopNSConfig
+from jnesty.dynesty.core import run_nested_sampling, WhileLoopNSConfig
 
 
 def _logZ_analytical(ndim):

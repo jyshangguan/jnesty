@@ -16,7 +16,7 @@ from jax import random, lax
 from jax.scipy.special import logsumexp
 from typing import Optional
 
-from .utils import randsphere
+from ..utils import randsphere
 from .multi_ellipsoid import (
     fit_multi_ellipsoid,
     MultiEllipsoidState,

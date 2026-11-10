@@ -152,6 +152,66 @@ class NautilusSampler:
         return self._native.write(filepath, overwrite=overwrite)
 
     # ------------------------------------------------------------------
+    # Results bridge (so jnesty.plotting works for this engine too)
+    # ------------------------------------------------------------------
+    def to_results(self):
+        """Build a Dynesty-style :class:`~jnesty.results.Results` view.
+
+        The shared :mod:`jnesty.plotting` helpers expect Dynesty-style
+        result arrays, so this converts the native posterior into that
+        shape: physical-space ``samples``, per-point ``logl``/``logwt``,
+        the evidence in ``logz`` and derived ``logvol`` /
+        ``logz_trajectory`` arrays. The native engine's public API
+        (``posterior()``, ``log_z``, ``n_like``, ``n_eff``) is unchanged,
+        and no evidence is re-estimated.
+
+        Result semantics differ from the Dynesty-style engine:
+        importance nested sampling has no ``logzerr`` (the run-to-run
+        uncertainty proxy is the effective sample size ``n_eff``), no
+        information estimate, and ``logvol`` / ``logz_trajectory`` are
+        derived quantities for plotting rather than native outputs.
+
+        Returns
+        -------
+        Results
+            A fresh snapshot of the current sampler state, with
+            per-sample arrays sorted by ascending ``logl``.
+
+        Examples
+        --------
+        >>> fig, axes = jnesty.plotting.cornerplot(sampler.to_results())
+        """
+        # Imported lazily so importing this module stays numpy-only and
+        # never pulls in jax through jnesty.results/jnesty.utils.
+        from .results import format_nautilus_results
+
+        return format_nautilus_results(self._native)
+
+    @property
+    def results(self):
+        """Cached :class:`~jnesty.results.Results` snapshot.
+
+        Built with :meth:`to_results` on first access and reused while the
+        native sampler's likelihood-evaluation count (``n_like``) is
+        unchanged; a further run invalidates it and the next access
+        rebuilds the snapshot. Treat the returned object as a read-only
+        view of the sampler state at snapshot time.
+
+        The same caveats as :meth:`to_results` apply: no ``logzerr``, and
+        ``logvol`` / ``logz_trajectory`` are derived plotting quantities.
+
+        Returns
+        -------
+        Results
+            Dynesty-compatible results object for :mod:`jnesty.plotting`.
+        """
+        snapshot = self.__dict__.get('_results_snapshot')
+        n_like = int(self._native.n_like)
+        if snapshot is None or snapshot[0] != n_like:
+            self._results_snapshot = (n_like, self.to_results())
+        return self._results_snapshot[1]
+
+    # ------------------------------------------------------------------
     # key diagnostics (everything else forwards via __getattr__)
     # ------------------------------------------------------------------
     @property

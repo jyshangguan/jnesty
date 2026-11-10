@@ -3,6 +3,8 @@ Results data structure and formatting for JNesty.
 
 Provides a Dynesty-compatible Results class and the format_results()
 function that converts raw sampler output into a structured results object.
+format_nautilus_results() is the equivalent bridge for the Nautilus engine,
+so both samplers can share :mod:`jnesty.plotting`.
 Also provides save_results() and load_results() for FITS I/O.
 """
 
@@ -10,17 +12,7 @@ import os
 import numpy as np
 from typing import Optional
 
-from .utils import call_with_context
-
-
-def _convert_to_numpy(arr):
-    """Convert JAX arrays or other array-like to numpy."""
-    if hasattr(arr, '__array__'):
-        return np.array(arr)
-    elif isinstance(arr, np.ndarray):
-        return arr
-    else:
-        return np.asarray(arr)
+from .utils import call_with_context, _convert_to_numpy
 
 
 class Results:
@@ -237,6 +229,111 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         'delta_logz': float(r.delta_logZ),
         'delta_logZ_threshold': delta_logZ_threshold,
         'rwalk_K': rwalk_K,
+    }
+
+    return Results(results_dict)
+
+
+def format_nautilus_results(native):
+    """
+    Build a Dynesty-compatible :class:`Results` from a JAX Nautilus sampler.
+
+    Uses only the native engine's public API, so it works for the real
+    :class:`~jnesty.nautilus.sampler.JaxSampler` as well as for stand-ins
+    that provide the same attributes: ``posterior()``, ``log_z``,
+    ``n_live``, ``n_like`` and ``n_eff``.
+
+    This is a *plotting bridge*, not a re-derivation of the Nautilus
+    evidence estimate: the native importance-nested-sampling semantics are
+    untouched. In particular there is no ``logzerr`` (importance nested
+    sampling has no run-to-run evidence error; the uncertainty proxy is the
+    effective sample size ``n_eff``), and ``logvol`` /
+    ``logz_trajectory`` are derived quantities that exist so the shared
+    :mod:`jnesty.plotting` functions (which expect Dynesty-style arrays)
+    can be used for Nautilus results.
+
+    Parameters
+    ----------
+    native : JaxSampler
+        A finished sampler, as returned by
+        :attr:`jnesty.NautilusSampler.native_sampler`.
+
+    Returns
+    -------
+    Results
+        Results object with the per-sample arrays sorted by ascending
+        ``logl`` and ``nan`` placeholders for the fields that only the
+        Dynesty-style engine defines (``logzerr``, ``information``,
+        ``eff``, ``acceptance_rate``, ``delta_logz``).
+
+    Notes
+    -----
+    ``logwt`` holds the normalised log-weights returned by
+    ``native.posterior()``; ``logvol = logwt - logl`` is therefore the
+    per-point log prior volume up to the constant evidence normalisation.
+    Since ``posterior()`` already normalises the weights,
+    ``logz_trajectory`` (the running log-sum of the weights) converges to
+    zero and is meaningful only as a plotting aid -- the evidence itself is
+    the ``logz`` key, taken from ``native.log_z``.
+    """
+    points, log_w, log_l = native.posterior()
+    points = _convert_to_numpy(points)
+    log_w = _convert_to_numpy(log_w)
+    log_l = _convert_to_numpy(log_l)
+
+    # Sort every per-point array by ascending log-likelihood: the plotting
+    # conventions in jnesty.plotting (runplot's -ln X axis) assume the
+    # standard likelihood-ordered nested-sampling sequence.
+    order = np.argsort(log_l)
+    points = points[order]
+    log_l = log_l[order]
+    log_w = log_w[order]
+
+    # Per-point log prior volume. Nautilus reports normalised log-weights and
+    # no volume array, so derive it; minimum.accumulate keeps -ln X
+    # monotonic despite the numerical jitter of the importance weights.
+    logvol = np.minimum.accumulate(log_w - log_l)
+
+    # Running log-sum of the per-point weights (plotting aid only).
+    logz_trajectory = np.logaddexp.accumulate(log_w)
+
+    log_z = native.log_z
+    logz = float('nan') if log_z is None else float(log_z)
+
+    n_live = int(native.n_live)
+    n_like = int(native.n_like)
+
+    results_dict = {
+        # Evidence (no error estimate for importance nested sampling)
+        'logz': logz,
+        'logzerr': float('nan'),
+        'logz_trajectory': logz_trajectory,
+
+        # This engine has no information / efficiency / acceptance diagnostics
+        'information': float('nan'),
+        'eff': float('nan'),
+        'acceptance_rate': float('nan'),
+        # Summary() compat: a completed Nautilus run stops on the live-set
+        # fraction / n_eff targets, so there is no delta-logZ criterion.
+        'converged': True,
+        'delta_logz': float('nan'),
+
+        # Samples and likelihoods (physical space, ascending logl)
+        'logl': log_l,
+        'logwt': log_w,
+        'samples': points,
+
+        # Derived volumes
+        'logvol': logvol,
+
+        # Diagnostics
+        'nlive': n_live,
+        'niter': n_like,
+        'n_like': n_like,
+        'n_eff': float(native.n_eff),
+
+        # Provenance
+        'sampler': 'nautilus',
     }
 
     return Results(results_dict)

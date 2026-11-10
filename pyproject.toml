@@ -36,4 +36,5 @@ markers = [
 addopts = "-m 'not slow' --tb=short -q"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["jnesty*"]

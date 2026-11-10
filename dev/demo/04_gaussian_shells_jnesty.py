@@ -23,10 +23,11 @@ import argparse
 from pathlib import Path
 
 
+# Import jnesty before jax so the quiet JAX log defaults apply (README: JAX log noise).
+from jnesty import NestedSampler, save_results
 import jax
 import jax.numpy as jnp
 from jax import random
-from jnesty import NestedSampler, save_results
 import matplotlib.pyplot as plt
 
 import time

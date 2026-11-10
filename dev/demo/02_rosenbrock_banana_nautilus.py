@@ -18,12 +18,13 @@ import json
 import time
 from pathlib import Path
 
+# Import jnesty before jax so the quiet JAX log defaults apply (README: JAX log noise).
+from jnesty import NautilusSampler
+
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
-
-from jnesty import NautilusSampler
 
 
 # ============================================================================

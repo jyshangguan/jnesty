@@ -5,15 +5,15 @@ description: Guide for adding a new bounding method to JNesty.
 
 ## Architecture
 
-Bounding methods live in `src/jnesty/bounding.py`. Each implements the `Bound` interface and is registered in `BOUND_REGISTRY` for lookup by string name.
+Bounding methods live in `jnesty/dynesty/bounding.py`. Each implements the `Bound` interface and is registered in `BOUND_REGISTRY` for lookup by string name.
 
 This skill covers the **Dynesty-style** bounds used by `NestedSampler` /
-`DynamicNestedSampler` (`src/jnesty/bounding.py`). The JAX Nautilus engine has
-its own, unrelated bound classes in `src/jnesty/nautilus/bounds.py`
+`DynamicNestedSampler` (`jnesty/dynesty/bounding.py`). The JAX Nautilus
+engine has its own, unrelated bound classes in `jnesty/nautilus/bounds.py`
 (`JaxNautilusBound`, `JaxUnion`, `JaxNeuralBound`, ...); see the
 `/develop-nautilus` skill for those.
 
-The core NS loop in `src/jnesty/sampler.py` calls `bound_obj.fit()` to update the bound, `bound_obj.get_axes()` for proposal generation, and optionally uses bound-specific state for multi-ellipsoid proposals.
+The core NS loop in `jnesty/dynesty/core.py` calls `bound_obj.fit()` to update the bound, `bound_obj.get_axes()` for proposal generation, and optionally uses bound-specific state for multi-ellipsoid proposals.
 
 ## Bound Interface
 
@@ -55,7 +55,7 @@ class Bound:
 - Use for: elongated unimodal posteriors
 
 ### MultiEllipsoidBound (`'multi'`)
-- `fit()`: delegates to `fit_multi_ellipsoid()` from `multi_ellipsoid.py`
+- `fit()`: delegates to `fit_multi_ellipsoid()` from `dynesty/multi_ellipsoid.py`
 - Stores state as `MultiEllipsoidState` NamedTuple
 - `get_axes()`: axes of the largest-volume ellipsoid
 - `get_walk_schedule(rwalk_K)`: Bresenham interleaving of ellipsoid indices
@@ -65,7 +65,7 @@ class Bound:
 
 ## Integration with the Core NS Loop
 
-The bound is used in several places in `src/jnesty/sampler.py`:
+The bound is used in several places in `jnesty/dynesty/core.py`:
 
 1. **Initial fit** (transition Phase 1 → Phase 2): `bound_obj.fit(live_x)` after Phase 1 completes
 2. **Axes extraction**: `bound_axes = bound_obj.get_axes()` for rwalk proposals
@@ -86,7 +86,7 @@ The bound state is packed into the flat tuple that `lax.while_loop` carries:
 
 Queue mode adds indices 18-22 for the candidate queue.
 
-A new bound that needs additional state in the loop must extend this tuple and update the packing/unpacking in `sampler.py`.
+A new bound that needs additional state in the loop must extend this tuple and update the packing/unpacking in `dynesty/core.py`.
 
 ### Scale history reset
 
@@ -96,7 +96,7 @@ At bound updates (chunk boundaries), `hist_accept` (index 11) and `hist_total` (
 
 ### 1. Implement the class
 
-Add your class to `src/jnesty/bounding.py`:
+Add your class to `jnesty/dynesty/bounding.py`:
 
 ```python
 class MyBound(Bound):
@@ -138,16 +138,16 @@ BOUND_REGISTRY = {
 
 If your bound needs periodic refitting or custom state carried through `lax.while_loop`:
 
-- Add fields to the state tuple in `sampler.py`
+- Add fields to the state tuple in `dynesty/core.py`
 - Add a `use_chunked_loop` branch similar to multi-ellipsoid
 - Update the body function to use your bound's state
 - Update queue mode body function (`body_fn_q`) if queue support is needed
 
-If your bound is stateless or only needs initial fitting, no changes to `sampler.py` are needed — the factory handles it.
+If your bound is stateless or only needs initial fitting, no changes to `dynesty/core.py` are needed — the factory handles it.
 
 ### 4. Test
 
-1. `python -m py_compile src/jnesty/bounding.py`
+1. `python -m py_compile jnesty/dynesty/bounding.py`
 2. Test with demo 01 (multimodal Gaussian) — bound should correctly identify two modes
 3. Compare logZ with Dynesty using the same bound type
 4. Check acceptance rate is reasonable (>0.2)

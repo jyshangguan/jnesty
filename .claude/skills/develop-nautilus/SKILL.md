@@ -6,15 +6,21 @@ description: Guide for developing the JAX Nautilus engine — bounds, emulator, 
 ## Scope
 
 This skill covers our JAX/GPU implementation of the Nautilus importance
-nested sampler in `src/jnesty/nautilus/` and its thin public adapter
-`src/jnesty/nautilus_sampler.py`. The upstream CPU implementation
+nested sampler in `jnesty/nautilus/` and its thin public adapter
+`jnesty/nautilus_sampler.py`. The upstream CPU implementation
 (`nautilus-sampler` 1.0.6) is a dependency and the parity oracle — never a
 target for edits.
+
+`jnesty/dynesty/` is the peer engine subpackage for the dynesty-style
+sampler (its public classes live in `jnesty/dynesty_sampler.py`). On the
+adapter side, `NautilusSampler` also offers `to_results()` and a cached
+`results` property (backed by `jnesty.results.format_nautilus_results`), which
+gives `jnesty.plotting` a dynesty-compatible view of a nautilus run.
 
 ## Engine Module Map
 
 ```
-src/jnesty/nautilus/
+jnesty/nautilus/
 ├── __init__.py      # Engine exports; calls _config.initialize_runtime() on import
 ├── sampler.py       # JaxSampler: shell loop, bound updates, refinement, posterior()
 ├── bounds.py        # PhaseShift, JaxUnitCube, JaxEllipsoid, JaxUnitCubeEllipsoidMixture,
@@ -158,11 +164,11 @@ python -m pytest -o addopts='' tests/nautilus -q      # full: 85 passed (~2.5 mi
 ## Adapter vs Engine Responsibilities
 
 - Public-API changes (argument names/order, properties, docstrings users
-  read) go in `src/jnesty/nautilus_sampler.py`. The adapter keeps the engine's
+  read) go in `jnesty/nautilus_sampler.py`. The adapter keeps the engine's
   call semantics but uses JNesty's convention (likelihood first, prior
   transform second, `ndim`/`nlive`); unknown attributes forward to
   `native_sampler` via `__getattr__`.
 - Algorithm changes (bounds, emulator, shell loop, fitting) go in
-  `src/jnesty/nautilus/`.
+  `jnesty/nautilus/`.
 - The upstream CPU `Sampler` and `Prior` are never re-exported: import them
   from `nautilus`, not from `jnesty`.

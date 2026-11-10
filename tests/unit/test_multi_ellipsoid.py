@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from jax import random
 
-from jnesty.multi_ellipsoid import (
+from jnesty.dynesty.multi_ellipsoid import (
     fit_bounding_ellipsoid, fit_multi_ellipsoid, MultiEllipsoidState,
     get_axes_for_rwalk, sample_from_union, contains, contains_all,
 )

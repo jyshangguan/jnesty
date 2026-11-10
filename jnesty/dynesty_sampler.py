@@ -8,7 +8,7 @@ This module holds both user-facing Dynesty-style sampler classes:
   results module.
 * :class:`DynamicNestedSampler` — Dynesty-style dynamic nested sampling on
   top of the static engine; the weight / stopping / combine math it uses
-  lives in :mod:`jnesty._dynamic`.
+  lives in :mod:`jnesty.dynesty._dynamic`.
 
 For the JAX Nautilus importance sampler see :class:`jnesty.NautilusSampler`
 (:mod:`jnesty.nautilus_sampler`).
@@ -21,13 +21,13 @@ import numpy as np
 from jax import random
 import warnings
 
-from .sampler import run_nested_sampling, WhileLoopNSConfig
+from .dynesty.core import run_nested_sampling, WhileLoopNSConfig
 from .results import Results, format_results
-from ._dynamic import (combine_saved_and_new, compute_integrals,
-                       estimate_fresh_batch_size_from_memory,
-                       generate_fresh_batch_points, kish_ess,
-                       seed_batch_from_saved, stopping_function,
-                       weight_function)
+from .dynesty._dynamic import (combine_saved_and_new, compute_integrals,
+                              estimate_fresh_batch_size_from_memory,
+                              generate_fresh_batch_points, kish_ess,
+                              seed_batch_from_saved, stopping_function,
+                              weight_function)
 
 # Default number of parallel random walks (lanes) of the queue mode.  The 
 # walks of one refill run in parallel while their steps run in sequence, so 

@@ -2,7 +2,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 from jnesty.results import Results, format_results, save_results, load_results, _SCALAR_KEYS
-from jnesty.sampler import WhileLoopNSResult
+from jnesty.dynesty.core import WhileLoopNSResult
 
 
 def _make_raw_result(n_dead=100, ndim=2, nlive=50, converged=True):
