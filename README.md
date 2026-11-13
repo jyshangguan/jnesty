@@ -30,16 +30,29 @@ inferences).
 
 ## Installation
 
+Install from PyPI:
+
 ```bash
-pip install -e .
+pip install jnesty
 ```
 
-Requires JAX with GPU support (`jax[cuda12]` or similar).
-
-The JAX Nautilus engine needs optional dependencies:
+The base install uses CPU JAX. For GPU acceleration:
 
 ```bash
-pip install -e ".[nautilus]"
+pip install "jnesty[cuda]"
+```
+
+Optional extras:
+
+```bash
+pip install "jnesty[nautilus]"   # JAX Nautilus engine
+pip install "jnesty[dynesty]"    # dynesty comparison toolchain
+```
+
+For development:
+
+```bash
+pip install -e ".[nautilus,test]"
 ```
 
 ## Documentation
