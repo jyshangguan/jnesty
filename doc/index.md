@@ -22,24 +22,37 @@ api
 
 ## Installation
 
+Install from PyPI:
+
 ```bash
-pip install -e .
+pip install jnesty
 ```
 
-This installs JNesty with JAX CUDA 12 GPU support. You need a CUDA-compatible
-GPU and driver. For CPU-only use, set `device='cpu'` when constructing the
-sampler.
+The base install uses CPU JAX. For GPU acceleration:
+
+```bash
+pip install "jnesty[cuda]"
+```
+
+GPU use requires a CUDA-compatible GPU and driver. For CPU-only use, set
+`device='cpu'` when constructing the sampler.
 
 Optional dependencies for dynesty comparison and plotting interop:
 
 ```bash
-pip install -e ".[dynesty]"
+pip install "jnesty[dynesty]"
 ```
 
 Optional dependencies for the JAX Nautilus importance sampler:
 
 ```bash
-pip install -e ".[nautilus]"
+pip install "jnesty[nautilus]"
+```
+
+For development:
+
+```bash
+pip install -e ".[nautilus,test]"
 ```
 
 ## Quick Start
