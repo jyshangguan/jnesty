@@ -22,7 +22,7 @@ api
 
 ## Installation
 
-Install from PyPI:
+Install from [PyPI](https://pypi.org/project/jnesty/):
 
 ```bash
 pip install jnesty

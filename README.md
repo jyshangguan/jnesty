@@ -4,6 +4,10 @@
 
 # JNesty
 
+[![PyPI version](https://img.shields.io/pypi/v/jnesty.svg)](https://pypi.org/project/jnesty/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/jyshangguan/jnesty/blob/main/LICENSE)
+[![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://jyshangguan.github.io/jnesty/)
+
 GPU-accelerated nested sampling with JAX, designed for expensive likelihood
 functions. JNesty parallelizes likelihood evaluations across GPU cores using
 JAX's `vmap`, making it well-suited for problems where each likelihood call is

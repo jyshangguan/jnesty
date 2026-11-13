@@ -1,8 +1,8 @@
 project = "JNesty"
 copyright = "2026, jyshangguan"
 author = "jyshangguan"
-version = "0.2.0"
-release = "0.1.0"
+version = "0.2"
+release = "0.2.0"
 
 extensions = [
     "myst_parser",
