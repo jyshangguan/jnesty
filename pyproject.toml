@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,16 +8,38 @@ version = "0.2.0"
 description = "GPU-accelerated random walk nested sampling with JAX"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "shangguan_kiaa206", email = "shangguan@pku.edu.cn"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
-    "jax[cuda12]>=0.4",
+    "jax>=0.4",
     "numpy",
     "matplotlib",
     "scipy",
     "tqdm",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jyshangguan/jnesty"
+Repository = "https://github.com/jyshangguan/jnesty"
+Issues = "https://github.com/jyshangguan/jnesty/issues"
+
 [project.optional-dependencies]
+cuda = ["jax[cuda12]>=0.4"]
 dynesty = ["dynesty", "corner", "astropy"]
 nautilus = [
     "nautilus-sampler>=1.0.6,<1.1",
