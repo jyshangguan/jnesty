@@ -206,6 +206,105 @@ Key parameters:
 - `maxbatch`: maximum number of batches
 - `n_effective`: target effective sample size for stopping
 
+## Diffusive Nested Sampling (DNest)
+
+`DNestSampler` exposes diffusive nested sampling (Brewer, Pártay &
+Csányi 2009) as our JAX port of CDNest (Yan-Rong Li's C/MPI
+implementation, pinned at commit `3aaa039`). The algorithm differs
+fundamentally from the static and importance engines above: there is no
+worst-live-point deletion and no bounding union.
+
+### Levels and learned compression
+
+The likelihood range is carved into *levels*. While levels are being
+built, every particle whose likelihood exceeds the current top threshold
+feeds an "above" reservoir; once the reservoir holds
+`new_level_interval` records, a new level is cut at the
+`1/compression` quantile (descending by likelihood and tiebreaker), and
+the reservoir keeps only the records above the new threshold. Level
+creation stops when the recent mean level spacing falls below `ptol`
+(CDNest's PTol test), at a fixed `max_num_levels`, or at the capacity of
+1000 levels.
+
+Each level's prior volume is *learned* from the ensemble's dynamics:
+whenever a particle update starts at level $j$, `visits[j]` increments,
+and `exceeds[j]` increments if the particle's likelihood also clears
+level $j+1$. With regularisation $R$ (CDNest:
+`int(new_level_interval * sqrt(lam))`),
+
+$$\log X_j = \log X_{j-1} + \log\frac{\text{exceeds}_{j-1} + R/c}
+{\text{visits}_{j-1} + R}.$$
+
+Because `exceeds <= visits` and `c > 1`, every ratio lies in $(0,1)$ and
+the volumes strictly decrease. When level creation finishes the counter
+histories are renormalised to the regularisation (with CDNest's `+1`
+smoothing), which keeps the learning responsive.
+
+### Diffusion across levels
+
+Each MCMC step selects one local particle and, in random order, applies
+two Metropolis updates:
+
+1. **Particle update** — perturb one coordinate by CDNest's
+   heavy-tailed step $h = 10^{1.5-3|t|}\,\mathcal{N}(0,1)$ (with $t$ a
+   Student-$t_2$), wrap into the unit cube, and accept if the proposal
+   clears the particle's level threshold (the wrapped one-coordinate
+   proposal is symmetric, so the Hastings ratio is exactly one).
+2. **Level move** — propose
+   $j' = j + \mathrm{int}(10^{2U}\mathcal{N}(0,1))$ (forced to $j\pm1$
+   when unchanged, wrapped modulo the level count) with acceptance
+
+$$\log A = \log\frac{X_j}{X_{j'}} + \big(\text{log\_push}(j') -
+\text{log\_push}(j)\big) + \beta \log\frac{\text{tries}_j + 1}
+{\text{tries}_{j'} + 1},$$
+
+where `log_push` = $(j - j_{\max})/\lambda$ while levels are built (a
+drift toward the newest level) and the $\beta$ equal-push term is active
+afterwards. The visit/exceed bookkeeping of step 1 is what teaches the
+level volumes.
+
+**Per-parameter proposal frequencies.** `sample_frequency` supplies
+relative weights for which coordinate each proposal perturbs (scalar
+broadcast or length-`ndim` vector, normalised internally; default
+uniform, the CDNest behaviour). Use a smaller weight for parameters that
+change little between good fits: fewer proposals are spent on them. The
+weights only allocate proposals — acceptance ratios, posterior weights
+and the evidence are unaffected — and `coordinate_attempts` /
+`coordinate_accepts` report the realised frequencies. Zero entries freeze
+a coordinate (with a warning).
+
+### GPU parallelism
+
+`num_lanes` independent workers — the JAX analogue of CDNest's MPI
+ranks — each hold `num_particles` local particles. One compiled program
+(`vmap` over lanes, `lax.scan` over each lane's sequential steps)
+advances `thread_steps = int(ndim · thread_steps_factor ·
+num_particles)` updates per lane with a frozen copy of the levels, then
+the host aggregates the counters, cuts at most one level, recomputes the
+volumes, broadcasts, and saves at most one particle — exactly CDNest's
+MPI loop structure. Every step performs exactly one likelihood
+evaluation, batched across lanes.
+
+### Postprocessing
+
+Evidence and weights follow CDNest's C postprocessor. Each saved sample
+is sandwiched between the levels whose thresholds straddle its
+likelihood; within a level, samples sorted by likelihood receive
+deterministic order-statistic volumes between the level bounds, and each
+sample's prior mass is the trapezoid between its neighbours, normalised
+globally:
+
+$$\log Z = \operatorname{logsumexp}(\log p + \log L), \qquad
+\log w = \log p + \log L - \log Z.$$
+
+The information is $H = \sum w \log L - \log Z$ and the effective
+sample size is the *entropy* ESS $\exp(-\sum w \log w)$. Runs stop at
+`max_num_saves` saved particles — a run-length control, not a
+convergence criterion — and there is no per-run `logzerr` (CDNest
+reports none either; repeat runs for evidence scatter). Preserved CDNest
+details include the root-lane-only lagging-particle replacement and the
+single-save-per-block cadence.
+
 ## Importance Nested Sampling (Nautilus)
 
 `NautilusSampler` exposes importance nested sampling. It is our JAX/GPU port
@@ -294,7 +393,13 @@ live point per iteration (discarding the other proposal work) and estimate the
 evidence with trapezoidal weights, quoting a `logzerr` derived from the
 information. The Nautilus engine instead fits nested bounds, retains every
 likelihood call and sums importance-weighted shell integrals, refining until
-the requested `n_eff` is reached. Pick Dynesty-style for the familiar dynesty
+the requested `n_eff` is reached. The DNest engine carves the likelihood into
+levels with learned compression and lets the ensemble diffuse across them, so
+it keeps exploring already-conquered territory and supports per-parameter
+proposal frequencies; its run length is a save budget, and evidence scatter
+comes from repeated runs. Pick Dynesty-style for the familiar dynesty
 API, error bars and dynamic allocation; pick Nautilus when likelihood calls are
 expensive enough that discarding them is wasteful, large weighted posterior
-samples are useful, and `n_eff` is a sufficient convergence diagnostic.
+samples are useful, and `n_eff` is a sufficient convergence diagnostic; pick
+DNest for CDNest-style diffusive exploration, nuisance-parameter control via
+`sample_frequency`, or when comparing directly against CDNest results.

@@ -339,6 +339,115 @@ def format_nautilus_results(native):
     return Results(results_dict)
 
 
+def format_dnest_results(native):
+    """
+    Build a Dynesty-compatible :class:`Results` from a DNest sampler.
+
+    Uses only the native engine's public surface (``native_result`` plus
+    diagnostics attributes), so it works for the real
+    :class:`~jnesty.dfnest.engine.JaxDNestSampler` as well as for
+    stand-ins that provide the same attributes.
+
+    This is a *plotting bridge*, not a re-derivation of the DNest
+    evidence: the native diffusive-nested-sampling semantics are
+    untouched.  In particular:
+
+    * ``logvol`` is the native postprocessed per-sample log prior volume
+      (level-sandwich order statistics), not a ``-i/nlive`` sequence;
+    * ``logwt`` holds the *unnormalised* evidence weights
+      ``logp + logl`` so that ``logsumexp(logwt) == logz`` exactly, while
+      ``posterior()`` returns the normalised weights;
+    * ``logz_trajectory`` is the cumulative log-sum in likelihood order
+      (a plotting aid that ends at ``logz``);
+    * there is no ``logzerr`` for a single run (CDNest reports none; the
+      uncertainty proxy is the entropy effective sample size ``n_eff``);
+    * ``converged`` mirrors whether the save target was reached, which is
+      a run-length statement, not an evidence-convergence claim.
+
+    Parameters
+    ----------
+    native : JaxDNestSampler
+        A finished engine, as returned by
+        :attr:`jnesty.DNestSampler.native_sampler`.
+
+    Returns
+    -------
+    Results
+        Results object with the per-sample arrays sorted by ascending
+        ``(logl, tiebreaker)`` and ``NaN`` placeholders for the fields
+        that only the Dynesty-style engine defines (``logzerr``,
+        ``eff``, ``delta_logz``).
+    """
+    result = native.native_result
+    if result is None:
+        raise RuntimeError(
+            'the DNest sampler has no results yet; run() must reach its '
+            'save target first')
+
+    # Likelihood/tiebreaker ordering, matching the plotting conventions.
+    order = np.lexsort((result.tie, result.logl))
+    samples = _convert_to_numpy(result.samples)[order]
+    samples_u = _convert_to_numpy(result.samples_u)[order]
+    logl = _convert_to_numpy(result.logl)[order]
+    logvol = _convert_to_numpy(result.logx)[order]
+    logp = _convert_to_numpy(result.logp)[order]
+    sample_levels = _convert_to_numpy(result.assignment)[order]
+
+    # Unnormalised evidence weights: logsumexp(logwt) == logz exactly.
+    logwt = logp + logl
+    logz_trajectory = np.logaddexp.accumulate(logwt)
+
+    max_num_saves = native.max_num_saves
+    results_dict = {
+        # Evidence (no error estimate for a single diffusive-NS run)
+        'logz': float(result.logz),
+        'logzerr': float('nan'),
+        'logz_trajectory': logz_trajectory,
+
+        # Information
+        'information': float(result.information),
+
+        # Samples and likelihoods (physical space, ascending logl)
+        'logl': logl,
+        'logwt': logwt,
+        'samples': samples,
+        'samples_u': samples_u,
+
+        # Native prior volumes and level assignments
+        'logvol': logvol,
+        'sample_levels': sample_levels,
+
+        # Diagnostics (no 'nlive': diffusive nested sampling has no live
+        # point count, and the shared plotting handles its absence)
+        'niter': int(native.n_steps),
+        'n_steps': int(native.n_steps),
+        'n_like': int(native.n_like),
+        'n_saves': int(native.n_saves),
+        'n_levels': int(native.n_levels),
+        'n_eff': float(result.n_eff),
+        'num_lanes': int(native.num_lanes),
+        'num_particles': int(native.num_particles),
+        'total_particles': int(native.total_particles),
+        'acceptance_rate': float(native.acceptance_rate),
+        'levels_finalized': bool(native.levels_finalized),
+
+        # Summary()/compat placeholders: 'converged' here only means the
+        # save target was reached (a run-length statement).
+        'converged': bool(native.completed),
+        'completed': bool(native.completed),
+        'eff': float('nan'),
+        'delta_logz': float('nan'),
+
+        # Provenance and native options
+        'sampler': 'dnest',
+        'ptol': float(native.ptol),
+        'max_num_saves': (None if max_num_saves is None
+                          else int(max_num_saves)),
+    }
+
+    return Results(results_dict)
+
+
 # ============================================================================
 # FITS I/O
 # ============================================================================
@@ -357,6 +466,21 @@ _SCALAR_KEYS = [
     ('delta_logz', 'DLZ', 'Final delta logZ'),
     ('delta_logZ_threshold', 'DLZTHR', 'Delta logZ threshold'),
     ('rwalk_K', 'RWALKK', 'Random walk steps'),
+]
+
+# Optional engine-specific scalar keys, written only when present so the
+# static/Dynesty-style and Nautilus results are unaffected.
+_DNEST_SCALAR_KEYS = [
+    ('sampler', 'SAMPLER', 'Sampler engine'),
+    ('n_eff', 'NEFF', 'Effective sample size'),
+    ('n_like', 'NLIKE', 'Likelihood evaluations'),
+    ('n_steps', 'NSTEPS', 'MCMC updates'),
+    ('n_saves', 'NSAVES', 'Saved particles'),
+    ('n_levels', 'NLEVELS', 'Number of levels'),
+    ('num_lanes', 'NLANES', 'Worker lanes'),
+    ('num_particles', 'NPART', 'Particles per lane'),
+    ('max_num_saves', 'MAXNSAVE', 'Save target'),
+    ('ptol', 'PTOL', 'Level PTol'),
 ]
 
 
@@ -378,12 +502,17 @@ def save_results(results, filepath):
     # Primary HDU with scalar metadata in header
     hdr = fits.Header()
     hdr['JNESTY'] = True
-    for key, keyword, comment in _SCALAR_KEYS:
-        if key in data:
-            val = data[key]
-            if hasattr(val, 'item'):
-                val = val.item()
-            hdr[keyword] = (val, comment)
+    for scalar_keys in (_SCALAR_KEYS, _DNEST_SCALAR_KEYS):
+        for key, keyword, comment in scalar_keys:
+            if key in data and data[key] is not None:
+                val = data[key]
+                if hasattr(val, 'item'):
+                    val = val.item()
+                if isinstance(val, (float, np.floating)) and np.isnan(val):
+                    # FITS headers cannot store NaN; use an undefined card
+                    # value and restore NaN on load.
+                    val = None
+                hdr[keyword] = (val, comment)
 
     primary = fits.PrimaryHDU(header=hdr)
 
@@ -397,6 +526,13 @@ def save_results(results, filepath):
         fits.Column(name='LOGVOL', format='D', array=data['logvol']),
         fits.Column(name='SAMPLES', format=f'{ndim}D', array=data['samples']),
     ]
+
+    if 'sample_levels' in data and data['sample_levels'] is not None:
+        cols.append(
+            fits.Column(name='LEVEL', format='J',
+                        array=np.asarray(data['sample_levels'],
+                                         dtype=np.int32))
+        )
 
     if 'samples_u' in data and data['samples_u'] is not None:
         cols.append(
@@ -460,9 +596,13 @@ def load_results(filepath):
         data = {}
 
         # Read scalars from header
-        for key, keyword, _ in _SCALAR_KEYS:
-            if keyword in hdr:
-                data[key] = hdr[keyword]
+        for scalar_keys in (_SCALAR_KEYS, _DNEST_SCALAR_KEYS):
+            for key, keyword, _ in scalar_keys:
+                if keyword in hdr:
+                    value = hdr[keyword]
+                    if value is None or isinstance(value, fits.Undefined):
+                        value = float('nan')
+                    data[key] = value
 
         # Convert boolean
         if 'converged' in data:
@@ -488,5 +628,8 @@ def load_results(filepath):
 
         if 'SCALE_TR' in table.columns.names:
             data['scale_trajectory'] = np.array(table.data['SCALE_TR'])
+
+        if 'LEVEL' in table.columns.names:
+            data['sample_levels'] = np.array(table.data['LEVEL'])
 
     return Results(data)

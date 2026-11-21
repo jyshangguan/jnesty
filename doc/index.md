@@ -5,9 +5,11 @@ functions. JNesty parallelizes likelihood evaluations across GPU cores using
 JAX's `vmap`, making it well-suited for problems where each likelihood call is
 computationally costly (forward models, simulations, large-data inferences).
 
-Two sampling engines are available: the Dynesty-style static/dynamic nested
-samplers, and our JAX port of the Nautilus importance nested sampler
-(`NautilusSampler`, optional `jnesty[nautilus]` dependencies).
+Three sampling engines are available: the Dynesty-style static/dynamic
+nested samplers, our JAX port of the Nautilus importance nested sampler
+(`NautilusSampler`, optional `jnesty[nautilus]` dependencies), and our JAX
+port of the CDNest diffusive nested sampler (`DNestSampler`, pure JAX with
+no extra dependencies).
 
 The API follows [dynesty](https://dynesty.readthedocs.io/), so switching is
 straightforward.
@@ -48,6 +50,8 @@ Optional dependencies for the JAX Nautilus importance sampler:
 ```bash
 pip install "jnesty[nautilus]"
 ```
+
+The DNest diffusive nested sampler needs no extra dependencies.
 
 For development:
 

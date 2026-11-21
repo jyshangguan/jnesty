@@ -2,7 +2,7 @@
 JNesty: GPU-accelerated nested sampling with JAX.
 
 A nested sampling package with a Dynesty-like API, pluggable
-samplers and bounding methods, and JAX GPU acceleration. Two sampling
+samplers and bounding methods, and JAX GPU acceleration. Three sampling
 engines are available:
 
 * Dynesty-style nested sampling (:class:`NestedSampler`,
@@ -11,6 +11,8 @@ engines are available:
 * Our JAX port of the Nautilus importance nested sampler
   (:class:`NautilusSampler`); needs the optional ``jnesty[nautilus]``
   dependencies.
+* Our JAX port of the CDNest diffusive nested sampler
+  (:class:`DNestSampler`); JAX-only, no extra dependencies.
 
 Example:
     >>> from jnesty import NestedSampler
@@ -33,6 +35,7 @@ from .dynesty_sampler import (NestedSampler, DynamicNestedSampler,
                                DEFAULT_QUEUE_SIZE, LEGACY_STEPS_PER_WALK,
                                auto_queue_size)
 from .nautilus_sampler import NautilusSampler
+from .dnest_sampler import DNestSampler
 from .dynesty.core import (run_nested_sampling, WhileLoopNSConfig,
                            WhileLoopNSResult)
 from .results import Results, save_results, load_results
@@ -50,6 +53,7 @@ __all__ = [
     'NestedSampler',
     'DynamicNestedSampler',
     'NautilusSampler',
+    'DNestSampler',
     'Results',
     'save_results',
     'load_results',

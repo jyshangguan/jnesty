@@ -24,6 +24,7 @@ Important files:
 jnesty/__init__.py                  # Public imports + JAX/absl log-noise defaults
 jnesty/dynesty_sampler.py           # Public dynesty classes (NestedSampler, DynamicNestedSampler)
 jnesty/nautilus_sampler.py          # Public Nautilus adapter (lazy engine import)
+jnesty/dnest_sampler.py             # Public DNest adapter (lazy engine import)
 
 jnesty/dynesty/                     # dynesty ENGINE subpackage (peer of nautilus/)
 jnesty/dynesty/core.py              # Core NS loop (delegates to Bound + InternalSampler)
@@ -33,9 +34,10 @@ jnesty/dynesty/multi_ellipsoid.py   # JIT-compiled multi-ellipsoid fitting core
 jnesty/dynesty/_dynamic.py          # Dynamic NS numerical helpers (no sampler classes)
 
 jnesty/nautilus/                    # OUR JAX Nautilus engine (JaxSampler, bounds, emulator)
+jnesty/dfnest/                     # OUR JAX DNest engine (diffusive NS, CDNest port)
 jnesty/utils.py                     # SHARED helpers (single home of _convert_to_numpy)
-jnesty/results.py                   # SHARED Results + format_results + format_nautilus_results
-jnesty/plotting.py                  # SHARED plotting for BOTH engines
+jnesty/results.py                   # SHARED Results + format_results + engine bridges
+jnesty/plotting.py                  # SHARED plotting for all engines
 ```
 
 Flat layout: the package lives at the repository root (`jnesty/`) — the same
@@ -74,12 +76,33 @@ NautilusSampler (nautilus_sampler.py)  # User-facing adapter (JNesty arg order)
   └─> to_results() / results -> format_nautilus_results (results.py)
                                        # Plotting bridge for the shared plotting
 
+DNestSampler (dnest_sampler.py)      # User-facing adapter (JNesty arg order)
+  └─> JaxDNestSampler (dfnest/engine.py)  # OUR JAX DNest diffusive NS engine
+        ├─> state.py     # DNestConfig + validation + LaneState/LevelBook
+        ├─> proposals.py # JIT kernels: randh, particle/level Metropolis moves
+        ├─> core.py      # Compiled block program (vmap lanes + scan steps)
+        ├─> levels.py    # Host bookkeeping: level cuts, logX, renormalisation
+        └─> postprocess.py # CDNest C postprocessor port (logZ/H/ESS/weights)
+  └─> to_results() / results -> format_dnest_results (results.py)
+
 "Nautilus" always means OUR JAX implementation in `jnesty/nautilus/`; the
 external `nautilus-sampler` package is only a support dependency (optional
 `jnesty[nautilus]` extra) for reference fitting routines, the reference
 emulator, `Prior` compatibility and parity tests. Its CPU `Sampler` is never
 merged or re-exported. Constructing a `NautilusSampler` enables JAX float64
 mode process-wide (plain `import jnesty` does not).
+
+"DNest" / "dfnest" always mean OUR JAX implementation in
+`jnesty/dfnest/`; the reference is CDNest (LiyrAstroph/CDNest, commit
+`3aaa039f9a0a76919c0ed65b355a50ecb497e6a2`), whose C postprocessor in
+`src/dnestpostprocess.c` is the authority for evidence and weights (the
+separate `python/cydnest/postprocess.py` is NOT). The engine is pure JAX
+(no optional extra). Constructing a `DNestSampler` enables JAX float64
+mode process-wide; the run length is `max_num_saves` (CDNest semantics,
+not a delta-logZ criterion), and there is no per-run `logzerr`. Parity
+with CDNest is statistical (multi-seed evidence/posterior gates), never
+bitwise RNG trajectories; `sample_frequency` weights coordinate
+proposals and never touches acceptance ratios or posterior weights.
 ```
 
 Sampling modes:
@@ -112,6 +135,7 @@ The current public-facing API is centered on:
 from jnesty import NestedSampler, plotting
 from jnesty import save_results, load_results
 from jnesty import NautilusSampler  # optional jnesty[nautilus] extra
+from jnesty import DNestSampler     # pure JAX, no extra dependency
 ```
 
 ## Collaboration style

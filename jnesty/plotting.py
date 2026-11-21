@@ -182,6 +182,10 @@ def _get_plot_data(results: Dict[str, Any]) -> Dict[str, Any]:
         logvol = -(iterations + 1) / nlive
         data['logvol'] = logvol
 
+    # Level assignments (DNest engine): aligned with the sample arrays
+    if 'sample_levels' in results and results['sample_levels'] is not None:
+        data['sample_levels'] = _convert_to_numpy(results['sample_levels'])
+
     # Compute weights if not present
     if 'weights' not in data:
         data['weights'] = _get_weights(results)
@@ -280,13 +284,20 @@ def runplot(results: Dict[str, Any],
     # Negative log prior volume for x-axis (Dynesty convention)
     neg_logvol = -logvol
 
-    # Plot 1: Live Points vs -ln X
+    # Plot 1: Live Points vs -ln X (or level assignment for the DNest
+    # engine, which has no live-point count)
     ax = axes[0]
-    # Create nlive trajectory matching thinned data length
-    nlive_traj = np.full(len(logvol), nlive)
-    ax.plot(neg_logvol, nlive_traj, color=color, **plot_kwargs)
-    ax.set_ylabel('Live Points')
-    ax.set_title('Live Points')
+    if data.get('sample_levels') is not None:
+        ax.plot(neg_logvol, data['sample_levels'], color=color,
+                **plot_kwargs)
+        ax.set_ylabel('Level')
+        ax.set_title('Level Assignment')
+    else:
+        # Create nlive trajectory matching thinned data length
+        nlive_traj = np.full(len(logvol), nlive)
+        ax.plot(neg_logvol, nlive_traj, color=color, **plot_kwargs)
+        ax.set_ylabel('Live Points')
+        ax.set_title('Live Points')
     ax.grid(True, alpha=0.3)
 
     # Plot 2: Likelihood (normalized) vs -ln X

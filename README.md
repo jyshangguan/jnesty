@@ -29,6 +29,10 @@ inferences).
 - **JAX Nautilus engine** — our GPU port of the Nautilus importance nested
   sampler: neural-network bounds, every likelihood call kept, and large
   weighted posterior samples (optional `jnesty[nautilus]` extra).
+- **JAX DNest engine** — our GPU port of the CDNest diffusive nested
+  sampler: likelihood levels with learned compression, particles that
+  diffuse across levels, per-parameter proposal frequencies, and
+  CDNest-compatible postprocessing (pure JAX, no extra dependencies).
 - **Dynesty result interop** — convert results to dynesty's `Results` object
   for use with its plotting utilities.
 
@@ -138,6 +142,52 @@ res = sampler.to_results()
 fig, axes = plotting.cornerplot(res)
 ```
 
+### Diffusive nested sampling with the DNest engine
+
+```python
+from jnesty import DNestSampler
+
+sampler = DNestSampler(loglikelihood, prior_transform, ndim=5,
+                       num_lanes=8, num_particles=2,
+                       sample_frequency=1.0, seed=0)
+log_z = sampler.run(max_num_saves=10000)
+points, log_w, log_l = sampler.posterior()
+print(f"logZ = {log_z:.4f}  ESS = {sampler.n_eff:.0f}")
+
+# Dynesty-compatible view (cached: sampler.results)
+res = sampler.to_results()
+fig, axes = plotting.runplot(res)
+```
+
+`DNestSampler` wraps **our JAX port** of the CDNest diffusive nested
+sampler. The likelihood is carved into levels with a fixed compression;
+each level's prior volume is *learned* from visit/exceed statistics, and
+the particle ensemble diffuses across levels (Brewer's diffusive nested
+sampling). `run()` stops after `max_num_saves` saved particles — a
+run-length control like CDNest's, not an evidence-convergence criterion —
+and `ptol` only stops level creation. There is no per-run `logzerr`;
+monitor `n_eff` (the entropy effective sample size) and, as CDNest
+recommends, repeat runs for evidence scatter.
+
+The headline feature is `sample_frequency`: per-parameter relative
+proposal weights. Parameters that barely move between good fits (nuisance
+parameters, slowly varying components) can get a smaller weight so the
+sampler proposes elsewhere:
+
+```python
+# Propose coordinate 0 three times as often as coordinate 1;
+# never touch coordinate 2 with the built-in proposal.
+sampler = DNestSampler(loglikelihood, prior_transform, ndim=3,
+                       sample_frequency=[3.0, 1.0, 0.0])
+```
+
+The weights only allocate proposals — they never alter acceptance
+ratios, posterior weights or the evidence — and `coordinate_attempts` /
+`coordinate_accepts` diagnostics report the realised frequencies.
+`num_lanes` independent workers (the JAX analogue of CDNest's MPI ranks)
+each hold `num_particles` particles and run one compiled program per
+block, so likelihood calls are batched across the whole ensemble.
+
 `NautilusSampler` wraps **our JAX port** of the Nautilus importance nested
 sampler (the external `nautilus-sampler` package is only a support
 dependency). It keeps the native Nautilus semantics: nested
@@ -155,7 +205,8 @@ The `to_results()` bridge reuses the shared plotting: `logzerr` is `nan`
 Note: constructing a `NautilusSampler` enables JAX float64 mode and an
 on-disk compilation cache (`~/.cache/nautilus_jax`); both are process-wide
 settings. Plain `import jnesty` and the Dynesty-style samplers are
-unaffected.
+unaffected. Constructing a `DNestSampler` enables JAX float64 mode as well
+(CDNest computes in double precision) but no compilation cache.
 
 ### Engine comparison
 
@@ -163,6 +214,7 @@ unaffected.
 |--------|-------|------------|----------------|-------------|----------|
 | Dynesty-style | `NestedSampler`, `DynamicNestedSampler` | `run_nested()` | `sampler.results` dict (`logz`, `samples`, `logwt`, ...) | `logzerr` | remaining-evidence threshold `delta_logZ`; dynamic runs add batch/ESS targets |
 | Nautilus | `NautilusSampler` | `run(f_live=0.01, n_eff=10000)` | `posterior()` → `(points, log_w, log_l)`; `log_z`, `n_eff`, `n_like`, `eta` | `n_eff` (no `logzerr`) | exploration to `f_live`, then refinement to `n_shell` and `n_eff` |
+| DNest | `DNestSampler` | `run(max_num_saves=10000)` returns `log_z` | `posterior()` → `(points, log_w, log_l)`; `log_z`, `n_eff`, `n_like`, levels, coordinate diagnostics | `n_eff` (no `logzerr`); repeat runs for evidence scatter | level creation stops at `ptol`; run length is `max_num_saves` |
 
 ### Saving and loading results
 
@@ -257,18 +309,21 @@ where = ["."]`). There is no `src/` directory.
 jnesty/
     __init__.py            # public API + JAX log-noise defaults
     dynesty_sampler.py     # public dynesty-style classes   (twins: one public
-    nautilus_sampler.py    # public Nautilus adapter         module per engine)
-    dynesty/               # dynesty-style engine              (peers: one engine
-    nautilus/              # JAX Nautilus engine               subpackage each)
+    nautilus_sampler.py    # public Nautilus adapter          module per engine)
+    dnest_sampler.py       # public DNest adapter
+    dynesty/               # dynesty-style engine           (peers: one engine
+    nautilus/              # JAX Nautilus engine               subpackage each;
+    dfnest/                # JAX DNest engine                  dnest = the
     utils.py               # shared helpers (single _convert_to_numpy, ...)
-    results.py             # shared Results + format_nautilus_results bridge
-    plotting.py            # shared plotting for BOTH engines
+    results.py             # shared Results + engine bridges
+    plotting.py            # shared plotting for all engines
 ```
 
 Each sampler family has the same structure: one public adapter module
-(`dynesty_sampler.py`, `nautilus_sampler.py`) plus one engine subpackage
-(`dynesty/`, `nautilus/`). `utils.py`, `results.py` and `plotting.py` are
-engine-agnostic and shared by both engines.
+(`dynesty_sampler.py`, `nautilus_sampler.py`, `dnest_sampler.py`) plus one
+engine subpackage (`dynesty/`, `nautilus/`, `dfnest/`). `utils.py`,
+`results.py` and `plotting.py` are engine-agnostic and shared by all
+engines.
 
 ## More Examples
 
@@ -282,14 +337,19 @@ The `dev/demo/` folder contains complete comparison scripts against dynesty:
 | `04_gaussian_shells` | 2D Gaussian shells | Thin degenerate ring structures |
 | `01_multimodal_gaussian_mixture_nautilus` | 5D bimodal Gaussian | Nautilus engine variant: neural bounds, every likelihood call kept |
 | `02_rosenbrock_banana_nautilus` | 2D Rosenbrock | Nautilus engine variant of the correlated banana |
+| `01_multimodal_gaussian_mixture_dnest` | 5D bimodal Gaussian | DNest engine variant: level diffusion, finite-box analytic reference |
+| `02_rosenbrock_banana_dnest` | 2D Rosenbrock | DNest engine variant of the correlated banana |
+| `03_highd_gaussian_dnest` | 20D Gaussian | DNest engine variant with the truncated-prior analytic H |
+| `04_gaussian_shells_dnest` | 2D Gaussian shells | DNest engine variant with polar-quadrature reference |
 
 Each Dynesty-style demo has a JNesty variant (`*_jnesty.py`) and a dynesty
-variant (`*_dynesty.py`) for direct comparison; the two `*_nautilus.py`
-scripts run the same problems with the Nautilus engine.
+variant (`*_dynesty.py`) for direct comparison; the `*_nautilus.py` and
+`*_dnest.py` scripts run the same problems with the Nautilus and DNest
+engines.
 
 ## Acknowledgments
 
-JNesty's sampling algorithms and bounding methods closely follow the [dynesty](https://github.com/joshspeagle/dynesty) nested sampling package. The Nautilus engine is our JAX port of the [nautilus](https://github.com/johannesulf/nautilus) importance nested sampler by Johannes U. Lange. We are also inspired by [JAXNS](https://github.com/Joshuaalbert/jaxns) to use JAX to accelerate nested sampling on GPU. This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
+JNesty's sampling algorithms and bounding methods closely follow the [dynesty](https://github.com/joshspeagle/dynesty) nested sampling package. The Nautilus engine is our JAX port of the [nautilus](https://github.com/johannesulf/nautilus) importance nested sampler by Johannes U. Lange. The DNest engine is our JAX port of [CDNest](https://github.com/LiyrAstroph/CDNest), Yan-Rong Li's C implementation of Brendon J. Brewer's [diffusive nested sampling](https://arxiv.org/abs/0912.2380). We are also inspired by [JAXNS](https://github.com/Joshuaalbert/jaxns) to use JAX to accelerate nested sampling on GPU. This package was developed with [Claude Code](https://claude.com/claude-code), powered by the [GLM](https://bigmodel.cn/) 5.1 model.
 
 ## License
 

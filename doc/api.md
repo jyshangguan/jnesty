@@ -49,6 +49,38 @@
    :show-inheritance:
 ```
 
+## DNestSampler
+
+```{eval-rst}
+.. autoclass:: jnesty.DNestSampler
+   :members:
+   :inherited-members:
+   :show-inheritance:
+```
+
+### JAX DNest Engine
+
+The engine behind :class:`jnesty.DNestSampler`: our JAX port of the CDNest
+diffusive nested sampler. Importing `jnesty.dfnest` enables JAX float64
+mode (CDNest computes in double precision).
+
+```{eval-rst}
+.. autoclass:: jnesty.dfnest.JaxDNestSampler
+   :members:
+   :show-inheritance:
+```
+
+#### Postprocessing
+
+```{eval-rst}
+.. autofunction:: jnesty.dfnest.dnest_postprocess
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.dfnest.DNestResult
+   :members:
+```
+
 ### JAX Nautilus Engine
 
 The engine behind :class:`jnesty.NautilusSampler`: our JAX port of the
@@ -132,6 +164,10 @@ cache; see `jnesty.nautilus._config`.
 .. autofunction:: jnesty.results.format_nautilus_results
 ```
 
+```{eval-rst}
+.. autofunction:: jnesty.results.format_dnest_results
+```
+
 ### FITS I/O
 
 ```{eval-rst}
@@ -145,8 +181,9 @@ cache; see `jnesty.nautilus._config`.
 ## Plotting
 
 All plotting functions accept a results dict (or `Results` object) as the
-first argument and return `(fig, axes)`. For a `NautilusSampler` run, pass
-`sampler.to_results()` (the same cached object as `sampler.results`).
+first argument and return `(fig, axes)`. For a `NautilusSampler` or
+`DNestSampler` run, pass `sampler.to_results()` (the same cached object as
+`sampler.results`).
 
 ```{eval-rst}
 .. autofunction:: jnesty.runplot

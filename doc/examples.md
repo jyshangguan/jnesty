@@ -1,12 +1,13 @@
 # Examples
 
 Five benchmark problems demonstrating JNesty's capabilities. The examples come
-in two flavours: **Dynesty-style** variants (`NestedSampler`,
-`DynamicNestedSampler`) and **Nautilus** variants (`NautilusSampler`, our JAX
-importance nested sampler). The code below is Dynesty-style unless a section
-is explicitly labelled "Nautilus variant"; examples 1 and 2 have both.
-Examples 3-5 are Dynesty-style only — the high-dimensional, Gaussian-shell and
-dynamic demos currently have no Nautilus variant.
+in three flavours: **Dynesty-style** variants (`NestedSampler`,
+`DynamicNestedSampler`), **Nautilus** variants (`NautilusSampler`, our JAX
+importance nested sampler) and **DNest** variants (`DNestSampler`, our JAX
+diffusive nested sampler). The code below is Dynesty-style unless a section is
+explicitly labelled with an engine variant; examples 1 and 2 have all three.
+Examples 3 and 4 additionally have DNest variants; example 5 (dynamic
+sampling) is Dynesty-style only.
 
 Each example shows the problem definition, full code, expected results, and
 sample output figures; every runnable demo lives under `dev/demo/`.
@@ -73,6 +74,25 @@ $\log Z \approx -6.87$ (approximate). There is no `logzerr` for this engine —
 monitor the effective sample size `n_eff` instead. The runnable script is
 `dev/demo/01_multimodal_gaussian_mixture_nautilus.py`.
 
+### DNest variant
+
+```python
+from jnesty import DNestSampler
+
+sampler = DNestSampler(loglikelihood, prior_transform, ndim=5,
+                       num_lanes=8, num_particles=2, seed=0)
+log_z = sampler.run(max_num_saves=20000)
+points, log_w, log_l = sampler.posterior()
+print(log_z, sampler.n_eff, sampler.n_levels)
+```
+
+A sample run (2000 saves) gives `logZ = -6.90` against the exact
+finite-box analytic value `-6.94`, with mode masses `0.59/0.41` (exact
+`0.611/0.389` — the second mode is truncated by the $[-5,5]^5$ prior).
+Level creation finishes through the PTol criterion, and the per-parameter
+`sample_frequency` can slow down well-determined nuisance parameters. The
+runnable script is `dev/demo/01_multimodal_gaussian_mixture_dnest.py`.
+
 ---
 
 ## 2. Rosenbrock Banana (2D)
@@ -133,6 +153,22 @@ $\log Z \approx -4.41$ (approximate). There is no `logzerr` for this engine —
 monitor the effective sample size `n_eff` instead. The runnable script is
 `dev/demo/02_rosenbrock_banana_nautilus.py`.
 
+### DNest variant
+
+```python
+from jnesty import DNestSampler
+
+sampler = DNestSampler(loglikelihood, prior_transform, ndim=2,
+                       num_lanes=8, num_particles=2, seed=0)
+log_z = sampler.run(max_num_saves=20000)
+points, log_w, log_l = sampler.posterior()
+```
+
+The DNest variant runs the same banana with level diffusion; a sample run
+(3000 saves) gives `logZ = -4.31` with a weighted posterior mean on the
+curved ridge. The runnable script is
+`dev/demo/02_rosenbrock_banana_dnest.py`.
+
 ---
 
 ## 3. High-Dimensional Gaussian (20D)
@@ -170,6 +206,12 @@ JNesty    logZ = -27.82 +/- 0.19
 Analytical logZ = -27.67
 Difference      = -0.15
 ```
+
+The DNest variant (`dev/demo/03_highd_gaussian_dnest.py`) reproduces both
+reference values in one run (a sample 20D run: `logZ = -27.64`, `H = 17.68`,
+marginal variance `0.994`) and uses the exact truncated-prior information
+$H_1 = -v/2 - \log Z_1 = 0.8837$ per dimension rather than the $d/2$
+approximation quoted above.
 
 JNesty agrees with the analytical value within Monte Carlo uncertainty. The
 run plot shows evidence convergence:
@@ -223,6 +265,10 @@ fig, axes = plotting.cornerpoints(r)
 logZ = -1.83 +/- 0.07
 Iterations: ~3900
 ```
+
+The DNest variant (`dev/demo/04_gaussian_shells_dnest.py`) recovers the
+polar-quadrature reference `logZ ≈ -1.75` (a sample run: `-1.71`), radial
+mean/width `1.99/0.10` against the true radius 2, and equal shell masses.
 
 The scatter plot shows two thin ring structures correctly identified by the
 multi-ellipsoid decomposition:
