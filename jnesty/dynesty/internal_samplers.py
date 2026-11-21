@@ -424,10 +424,10 @@ class HSliceSampler(InternalSampler):
         sets the *length* of the chord set (``max_move`` steps of length
         ``|axes @ drhat| * scale * 0.01``), and hence how far a slice can move.
         Measured on a 5-D correlated Gaussian (nlive=150, 5 slices): the
-        5-seed mean evidence error is -1.4 with ``max_move=30`` (the
-        trajectory spans a small fraction of the constrained region and the
-        live set cannot refresh) versus -0.28 with 100 and 60/100/200-step
-        runs become indistinguishable from the rwalk scatter.
+        5-seed mean evidence error is -1.4 with ``max_move=30`` -- the
+        trajectory then spans only a small fraction of the constrained region
+        and the live set cannot refresh -- versus -0.3 with 100+ (where the
+        remaining scatter matches the rwalk sampler's).
     max_reflects : int, optional
         Maximum number of boundary reflections per direction.  Default: 15
     max_chords : int, optional
@@ -590,7 +590,7 @@ class HSliceSampler(InternalSampler):
                     k_in,                       # 2 key
                     jnp.array(False),           # 3 reflect (previous step)
                     u_cur,                      # 4 u_out
-                    jnp.array(-jnp.inf),        # 5 logl_out
+                    jnp.array(-jnp.inf, dtype=dtype),  # 5 logl_out
                     jnp.array(False),           # 6 has_out
                     zero_i,                     # 7 n_in
                     inbuf,                      # 8 in-bounds points
@@ -608,9 +608,10 @@ class HSliceSampler(InternalSampler):
                      n_in, buf, nc, aborted, n_a, n_t) = s
                     ky2, kk = random.split(ky2)
                     step = random.uniform(kk, (), minval=1.0 - jitter,
-                                          maxval=1.0 + jitter)
+                                          maxval=1.0 + jitter).astype(dtype)
                     u_new = u + step * vel_
                     logl_new, inb = _logl(u_new)
+                    logl_new = logl_new.astype(dtype)
                     out = logl_new < constraint
                     violated = out & reflect        # reflected and still out
                     newly_out = out & (~reflect)    # first point out of bounds
@@ -641,7 +642,7 @@ class HSliceSampler(InternalSampler):
 
                 # --- interior "mid" node: random in-bounds point -----------
                 ky_i, k_mid = random.split(ky_i)
-                r_mid = random.uniform(k_mid, ())
+                r_mid = random.uniform(k_mid, ()).astype(dtype)
                 mid_idx = jnp.minimum(
                     (r_mid * jnp.maximum(n_in, 1).astype(dtype)).astype(
                         jnp.int32),
@@ -695,16 +696,16 @@ class HSliceSampler(InternalSampler):
             ky, k_dir, k_win = random.split(ky, 3)
 
             # Direction on the unit sphere, transformed/scaled by the bound.
-            z = random.normal(k_dir, (ndim,))
+            z = random.normal(k_dir, (ndim,)).astype(dtype)
             z = z / jnp.maximum(jnp.linalg.norm(z), tiny)
             axis = (axes @ z) * scale * 0.01
 
             # Initial window (fallback chord, slot 0).
             k_win, k_l, k_r = random.split(k_win, 3)
             jl = random.uniform(k_l, (), minval=1.0 - jitter,
-                                maxval=1.0 + jitter)
+                                maxval=1.0 + jitter).astype(dtype)
             jr = random.uniform(k_r, (), minval=1.0 - jitter,
-                                maxval=1.0 + jitter)
+                                maxval=1.0 + jitter).astype(dtype)
             L = jnp.zeros((max_chords, ndim), dtype=dtype).at[0].set(
                 u - jl * axis)
             M = jnp.zeros((max_chords, ndim), dtype=dtype).at[0].set(u)
@@ -743,7 +744,7 @@ class HSliceSampler(InternalSampler):
                     alen / jnp.maximum(total, tiny),
                     (arc == first).astype(dtype))
                 idx = random.choice(k_ch, max_chords, p=probs)
-                rprop = random.uniform(k_rp, ())
+                rprop = random.uniform(k_rp, ()).astype(dtype)
 
                 u_l = Lc[idx]
                 u_m = Mc[idx]

@@ -17,6 +17,6 @@ class TestWhileLoopNSResult:
             'logZ', 'logZ_error', 'H', 'delta_logZ', 'n_iterations',
             'runtime', 'samples', 'logL_samples', 'delta_logZ_trajectory',
             'scale_trajectory', 'acceptance_rate', 'live_x', 'live_logL',
-            'samples_u', 'init_logX', 'init_iter_offset',
+            'samples_u', 'init_logX', 'init_iter_offset', 'ncall',
         ]
         assert list(WhileLoopNSResult._fields) == expected

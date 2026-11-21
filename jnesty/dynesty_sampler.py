@@ -185,10 +185,20 @@ class NestedSampler:
         ``loglikelihood(prior_transform(u))`` automatically.
     hslice_kwargs : dict, optional
         Only used by ``sample='hslice'``. Extra keyword arguments for the
-        Hamiltonian slice sampler: ``max_move`` (trajectory steps per
-        direction, default 30), ``max_reflects`` (reflections per direction,
-        default 15), ``max_chords`` (chord buffer size, default 64) and
-        ``max_contract`` (chord proposals per slice, default 60).
+        Hamiltonian slice sampler (see also
+        :class:`~jnesty.dynesty.internal_samplers.HSliceSampler`):
+
+        * ``max_move``: trajectory steps per direction (default 100,
+          dynesty's value);
+        * ``max_reflects``: reflections per direction (default 15);
+        * ``max_chords``: chord buffer size (default 64);
+        * ``max_contract``: chord proposals per slice (default 60).
+
+    Notes
+    -----
+    The random seed is not a constructor argument: pass ``seed`` to
+    :meth:`run_nested` (``jax.random.PRNGKey(seed)``, default 42) to make a
+    run reproducible or to draw an independent realisation.
     """
 
     def __init__(
