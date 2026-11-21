@@ -11,7 +11,7 @@ Returns raw WhileLoopNSResult for formatting by results.py.
 import hashlib
 import time
 from functools import partial
-from typing import Optional, NamedTuple
+from typing import Callable, Optional, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -113,6 +113,14 @@ class WhileLoopNSConfig(NamedTuple):
     init_logX: float = 0.0               # starting log-vol (saved logvol at vol_idx)
     init_ncall: int = 0                  # likelihood calls from pre-loaded history
     init_iter_offset: int = 0            # iteration count from pre-loaded history
+    # --- proposal sampler selection (defaults preserve the rwalk behaviour) ---
+    sample: str = 'rwalk'                # 'rwalk' (default) or 'hslice'
+    #: Extra keyword arguments for the proposal sampler (e.g. the caps of the
+    #: Hamiltonian slice sampler).  ``None`` (default) keeps the repr stable,
+    #: which matters because ``repr(config)`` is part of the compile-cache key.
+    hslice_kwargs: Optional[dict] = None
+    #: Optional unit-cube-space gradient override for ``sample='hslice'``.
+    grad_loglikelihood: Optional[Callable] = None
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -133,6 +141,7 @@ class WhileLoopNSResult(NamedTuple):
     samples_u: jnp.ndarray = None   # dead-point unit-cube coords (before prior transform)
     init_logX: float = 0.0          # pre-loaded logvol offset (batch mode)
     init_iter_offset: int = 0       # pre-loaded iteration count (batch mode)
+    ncall: int = 0                  # total likelihood+gradient evaluations (dynesty's ncall)
 
 
 # Upper bound on the number of likelihood calls of one sampling phase, as a
@@ -409,6 +418,17 @@ def run_nested_sampling(
     rwalk_K = config.rwalk_K
     min_ncall = config.min_ncall if config.min_ncall is not None else 2 * nlive
 
+    # Queue mode refills its candidates with ``vmap_queue_refill``, which runs
+    # the random-walk proposal directly, so it is rwalk-only.  Force it off
+    # *before* any queue state or lax.cond branch is built, so an hslice run
+    # never traces a random-walk refill.
+    if config.sample == 'hslice' and config.queue_size > 1:
+        if config.verbose:
+            print(f"  hslice: queue mode is not available "
+                  f"(queue_size={config.queue_size} -> 0), using the serial "
+                  f"slice sampler")
+        config = config._replace(queue_size=0)
+
     # Wrap likelihood with prior_transform if needed.  With a context, both
     # user callables take it as a second argument, and the value reaches every
     # compiled function here as an argument rather than a closure constant.
@@ -520,6 +540,7 @@ def run_nested_sampling(
         iteration_final = phase1_iters
         final_hist_accept = 0
         final_hist_total = phase1_total_calls
+        ncall_final = int(phase1_total_calls)
     else:
         # === TRANSITION: Fit initial bound ===
 
@@ -550,10 +571,17 @@ def run_nested_sampling(
         )
         config = config._replace(batch_size=effective_batch_size)
 
-        sampler_obj = get_sampler('rwalk', ndim,
-                                  target_acceptance=config.target_acceptance,
-                                  batch_size=effective_batch_size,
-                                  ncdim=config.ncdim if config.ncdim else ndim)
+        sampler_kwargs = dict(
+            target_acceptance=config.target_acceptance,
+            batch_size=effective_batch_size,
+            ncdim=config.ncdim if config.ncdim else ndim,
+        )
+        if config.sample == 'hslice':
+            # Sampler-specific caps (max_move, max_reflects, ...) plus the
+            # optional unit-cube-space gradient override.
+            sampler_kwargs.update(config.hslice_kwargs or {})
+            sampler_kwargs['grad_loglikelihood'] = config.grad_loglikelihood
+        sampler_obj = get_sampler(config.sample, ndim, **sampler_kwargs)
 
         # The sampler may round batch_size down for GPU sharding (multiple of n_devices).
         # Use the actual batch_size from the sampler for all downstream code.
@@ -1099,6 +1127,8 @@ def run_nested_sampling(
         iteration_final = int(final_state[8])
         final_hist_accept = float(final_state[11])
         final_hist_total = float(final_state[12]) + phase1_total_calls
+        # Total likelihood+gradient evaluations (state[17] never resets).
+        ncall_final = int(final_state[17])
 
     # === Final results processing ===
     live_x_final = live_x
@@ -1176,6 +1206,7 @@ def run_nested_sampling(
         print(f"Converged: {float(delta_logZ_final) < delta_logZ_threshold}")
         print(f"Speed: {actual_iterations / runtime:.1f} iterations/sec")
         print(f"Acceptance rate: {acceptance_rate:.1%}")
+        print(f"Likelihood calls (ncall): {ncall_final}")
 
     return WhileLoopNSResult(
         logZ=logZ,
@@ -1194,4 +1225,5 @@ def run_nested_sampling(
         samples_u=samples_u,
         init_logX=config.init_logX,
         init_iter_offset=config.init_iter_offset,
+        ncall=ncall_final,
     )

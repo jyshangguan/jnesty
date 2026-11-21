@@ -167,6 +167,28 @@ class NestedSampler:
         Fraction of GPU memory to use for batch walks. Default: 0.9.
         Caps batch_size if it would exceed this fraction of GPU memory.
         Ignored on CPU.
+    sample : {'rwalk', 'hslice'}, optional
+        Proposal sampler. ``'rwalk'`` (default) is the random-walk walk
+        sampler. ``'hslice'`` selects the "Hamiltonian" slice sampler, which
+        moves by slice sampling along gradient-reflected trajectories and uses
+        autodiff gradients through the prior transform. For ``'hslice'``:
+        ``rwalk_K`` is the number of *slices* per iteration (dynesty's
+        ``slices``), ``batch_size`` is forced to 1 and the queue mode is
+        unavailable (``queue_size`` is forced to 0), because the trajectory is
+        intrinsically serial.
+    grad_loglikelihood : callable, optional
+        Only used by ``sample='hslice'``. Optional override for the gradient
+        used by the specular reflections. It is called in **unit-cube space**
+        as ``grad_loglikelihood(u)`` (or ``grad_loglikelihood(u, context)``
+        when a context is given) and must return ``dlogL/du`` including the
+        prior-transform Jacobian. When omitted, ``jax.grad`` differentiates
+        ``loglikelihood(prior_transform(u))`` automatically.
+    hslice_kwargs : dict, optional
+        Only used by ``sample='hslice'``. Extra keyword arguments for the
+        Hamiltonian slice sampler: ``max_move`` (trajectory steps per
+        direction, default 30), ``max_reflects`` (reflections per direction,
+        default 15), ``max_chords`` (chord buffer size, default 64) and
+        ``max_contract`` (chord proposals per slice, default 60).
     """
 
     def __init__(
@@ -191,6 +213,9 @@ class NestedSampler:
         min_eff: float = 10.0,
         min_ncall: Optional[int] = None,
         context=None,
+        sample: str = 'rwalk',
+        grad_loglikelihood: Optional[Callable] = None,
+        hslice_kwargs: Optional[Dict[str, Any]] = None,
     ):
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
@@ -199,6 +224,17 @@ class NestedSampler:
         #: carry the dataset, so the compiled kernels do not embed it and are
         #: reused from one dataset to the next (see ``clear_compiled_units()``).
         self.context = context
+        #: Proposal sampler: 'rwalk' (default) or 'hslice'.
+        if sample not in ('rwalk', 'hslice'):
+            raise ValueError(
+                f"sample must be 'rwalk' or 'hslice' (got {sample!r})")
+        self.sample = sample
+        self.grad_loglikelihood = grad_loglikelihood
+        self.hslice_kwargs = dict(hslice_kwargs) if hslice_kwargs else None
+        # Remember the *requested* values: the hslice notes below must only
+        # fire when an explicit user request is overridden.
+        _requested_queue_size = queue_size
+        _requested_batch_size = batch_size
         self.ndim = ndim
         self.nlive = nlive
         self.target_acceptance = target_acceptance
@@ -280,6 +316,26 @@ class NestedSampler:
             if verbose:
                 print(f"Auto-tuned batch_size = {batch_size} "
                       f"(rwalk_K={rwalk_K}, ~{max(1, rwalk_K // batch_size)} steps/walk)")
+
+        # 'hslice' is a serial slice sampler: parallel batch walks and the
+        # queue mode are both unavailable (the queue refills its candidates
+        # with the random-walk proposal).  Force them off, with a note when an
+        # explicit user request is being overridden.
+        if sample == 'hslice':
+            if _requested_queue_size is not None and not isinstance(
+                    _requested_queue_size, str) and _requested_queue_size > 1:
+                if verbose:
+                    print(f"hslice: queue mode is not available for the "
+                          f"Hamiltonian slice sampler (queue_size="
+                          f"{_requested_queue_size} -> 0)")
+            if _requested_batch_size is not None and _requested_batch_size > 1:
+                if verbose:
+                    print(f"hslice: parallel batch walks are not available "
+                          f"for the Hamiltonian slice sampler (batch_size="
+                          f"{_requested_batch_size} -> 1)")
+            queue_size = 0
+            batch_size = 1
+
         self.batch_size = batch_size
         self.queue_size = queue_size
 
@@ -303,6 +359,7 @@ class NestedSampler:
         init_logX: float = 0.0,
         init_ncall: int = 0,
         init_iter_offset: int = 0,
+        seed: int = 42,
     ) -> None:
         """
         Run the nested sampling algorithm.
@@ -322,6 +379,10 @@ class NestedSampler:
             If provided, Phase 1 uniform rejection is skipped.
         init_logvol : float, optional
             Starting log-volume (path-A fallback when -inf-logL points were rejected).
+        seed : int, optional
+            Seed of the run's PRNG key (``jax.random.PRNGKey(seed)``).
+            Default: 42, which preserves the historical behaviour.  Two runs
+            with the same seed produce identical results.
         """
         if self.verbose:
             print("=" * 70)
@@ -331,7 +392,11 @@ class NestedSampler:
             print(f"Live points: {self.nlive}")
             print(f"Max iterations: {max_iterations}")
             print(f"Device: {self.device.upper()}")
-            print(f"Walk steps per iteration: {self.rwalk_K}")
+            if self.sample == 'hslice':
+                print(f"Slices per iteration: {self.rwalk_K}")
+                print("Proposal sampler: hslice (Hamiltonian slice sampling)")
+            else:
+                print(f"Walk steps per iteration: {self.rwalk_K}")
             print(f"Initial step scale: {self.rwalk_step_scale:.4f}")
             print(f"Convergence threshold: delta_logZ < {delta_logZ_threshold}")
             print("=" * 70)
@@ -369,9 +434,12 @@ class NestedSampler:
             init_logX=init_logX,
             init_ncall=init_ncall,
             init_iter_offset=init_iter_offset,
+            sample=self.sample,
+            hslice_kwargs=self.hslice_kwargs,
+            grad_loglikelihood=self.grad_loglikelihood,
         )
 
-        key = random.PRNGKey(42)
+        key = random.PRNGKey(seed)
         self._raw_result = run_nested_sampling(
             loglikelihood_fn=self.loglikelihood,
             prior_sample_fn=prior_sample,

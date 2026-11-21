@@ -221,6 +221,10 @@ def format_results(raw_result, prior_transform, ndim, nlive, rwalk_K,
         # Diagnostics
         'nlive': nlive,
         'niter': int(r.n_iterations),
+        # Likelihood (+ gradient) evaluations spent by the run.  For rwalk this
+        # is the accumulated proposal count; for sample='hslice' it also
+        # includes the autodiff gradient evaluations, matching dynesty's ncall.
+        'ncall': int(getattr(r, 'ncall', 0)),
         'eff': eff,
 
         # JNesty-specific
