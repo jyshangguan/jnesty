@@ -590,6 +590,11 @@ def run_nested_sampling(
 
         # === PHASE 2: Rwalk with adaptive bounding ===
         use_multi_ellipsoid = config.bound == 'multi'
+        # Upstream parity (dynesty nestedsamplers.py propose_live): 'hslice'
+        # receives IDENTITY axes in both the single- and multi-ellipsoid
+        # samplers; only 'rwalk'/'rslice'/'slice' receive ellipsoid axes.
+        # The core enforces the same routing in the axes selection below.
+        _is_hslice = config.sample == 'hslice'
         bound_update_interval = config.bound_update_interval
         use_chunked_loop = use_multi_ellipsoid and bound_update_interval > 0
         max_ellipsoids = config.max_ellipsoids
@@ -708,7 +713,25 @@ def run_nested_sampling(
                     x_starts = x_current
 
                 # Select axes
-                if use_multi_ellipsoid:
+                if _is_hslice:
+                    # Identity axes for the Hamiltonian slice sampler,
+                    # matching upstream dynesty (nestedsamplers.py:
+                    # ``if self.sampling in ['rwalk', 'rslice', 'slice']:
+                    # ax = ell.axes; else: ax = np.identity(ndim)``).
+                    # Passing bound axes here distorts the slice velocities
+                    # ``axes @ z * scale * 0.01``: the single-bound axes are
+                    # covariance-matched (benign anisotropy), but the multi
+                    # bound's volume-weighted random ellipsoid axes break the
+                    # trajectories outright (T1 2026-11-23: corr5 hslice+multi
+                    # logZ err -4.29/-4.77, gaussian20 +3.80, acceptance
+                    # stalled at ~0.10 vs target 0.4).  hslice always runs
+                    # serial (batch_size=1, queue off), so the broadcast is
+                    # defensive only.
+                    ba = jnp.eye(ndim, dtype=live_x.dtype)
+                    if effective_batch_size > 1:
+                        ba = jnp.broadcast_to(
+                            ba, (effective_batch_size,) + ba.shape)
+                elif use_multi_ellipsoid:
                     logvol = me_axes_state.shape[0]
                     ell_log_probs = me_logvol_ells - jax.scipy.special.logsumexp(me_logvol_ells)
                     ell_probs = jnp.exp(ell_log_probs)

@@ -207,3 +207,107 @@ class TestSeedReproducibility:
     def test_default_seed_is_42(self):
         logz_default = self._tiny_run(42)
         assert logz_default == self._tiny_run(42)
+
+
+class TestAxesRouting:
+    """The core must route IDENTITY axes to hslice (upstream parity).
+
+    Upstream dynesty (nestedsamplers.py ``propose_live``) gives ellipsoid
+    axes only to 'rwalk'/'rslice'/'slice'; hslice receives ``np.identity``.
+    jnesty's core historically passed the bound axes to every sampler,
+    which collapsed the hslice evidence under ``bound='multi'``
+    (T1 2026-11-23: corr5 logZ err -4.29/-4.77, gaussian20 +3.80).  These
+    tests pin the corrected routing: hslice -> identity (both bounds),
+    rwalk -> bound axes (both bounds).  Deterministic: no statistical
+    tolerance is involved.
+    """
+
+    NDIM2 = 2
+
+    @staticmethod
+    def _loglik2(x):
+        return -0.5 * jnp.sum(jnp.asarray(x) ** 2)
+
+    @staticmethod
+    def _ptform2(u):
+        return (jnp.asarray(u) - 0.5) * 10.0
+
+    def _run_with_spy(self, monkeypatch, sample, bound):
+        """Run a tiny engine loop with a spy internal sampler.
+
+        Returns the list of ``is_identity`` flags recorded for the axes
+        the core passed to ``sampler_obj.sample``.  The spy accepts every
+        proposal (returns the start point with logL above the constraint),
+        so the loop itself is trivial; only the routing is under test.
+        """
+        import jnesty.dynesty.internal_samplers as _isamplers
+        from jax import random as jrandom
+        from jnesty.dynesty.core import (WhileLoopNSConfig,
+                                         clear_compiled_units,
+                                         run_nested_sampling)
+
+        recorded = []
+
+        class _SpySampler:
+            def __init__(self, ndim, target_acceptance=0.5, batch_size=1,
+                         ncdim=None, **kwargs):
+                self.ndim = ndim
+                self.batch_size = 1
+                self.ncdim = ncdim if ncdim is not None else ndim
+
+            def sample(self, key, x_starts, logL_constraint,
+                       loglikelihood_fn, axes, scale, n_steps,
+                       prior_bounds=None, walk_schedule=None, context=None):
+                # ``axes`` is traced inside the jitted loop (even the
+                # identity constant), so materialize it at runtime with a
+                # debug callback and record whether it is the identity.
+                def _record(a, ndim=self.ndim):
+                    arr = np.asarray(a)
+                    recorded.append(bool(
+                        arr.shape == (ndim, ndim)
+                        and np.allclose(arr, np.eye(ndim, dtype=arr.dtype))))
+                jax.debug.callback(_record, axes)
+                x = jnp.asarray(x_starts)
+                logl = jnp.asarray(logL_constraint) + 1.0
+                one = jnp.array(1, dtype=jnp.int32)
+                return x, logl, one, one
+
+            def tune(self, scale, acceptance_rate, ndim, iteration):
+                return scale
+
+        def _spy_get_sampler(name, ndim, **kwargs):
+            return _SpySampler(ndim, **kwargs)
+
+        # The engine caches compiled kernels; make sure this run compiles
+        # against the spy rather than reusing a previously cached program.
+        clear_compiled_units()
+        monkeypatch.setattr(_isamplers, 'get_sampler', _spy_get_sampler)
+
+        config = WhileLoopNSConfig(
+            nlive=8, max_iterations=3, delta_logZ_threshold=10.0,
+            rwalk_K=2, sample=sample, bound=bound, queue_size=0,
+            batch_size=1, verbose=False, print_progress=False)
+        run_nested_sampling(
+            self._loglik2,
+            lambda key: jrandom.uniform(key, shape=(self.NDIM2,)),
+            self.NDIM2, config, key=jrandom.PRNGKey(0),
+            prior_transform_fn=self._ptform2)
+        monkeypatch.undo()
+        clear_compiled_units()
+        return recorded
+
+    def test_hslice_gets_identity_axes_single(self, monkeypatch):
+        recorded = self._run_with_spy(monkeypatch, 'hslice', 'single')
+        assert recorded and all(recorded)
+
+    def test_hslice_gets_identity_axes_multi(self, monkeypatch):
+        recorded = self._run_with_spy(monkeypatch, 'hslice', 'multi')
+        assert recorded and all(recorded)
+
+    def test_rwalk_gets_bound_axes_single(self, monkeypatch):
+        recorded = self._run_with_spy(monkeypatch, 'rwalk', 'single')
+        assert recorded and not any(recorded)
+
+    def test_rwalk_gets_bound_axes_multi(self, monkeypatch):
+        recorded = self._run_with_spy(monkeypatch, 'rwalk', 'multi')
+        assert recorded and not any(recorded)
