@@ -81,6 +81,13 @@ class DNestResult:
         Normalised log posterior weights; ``logsumexp(logwt) == 0``.
     logz, information, n_eff : float
         Evidence, information (nats) and entropy effective sample size.
+
+    Notes
+    -----
+    ``logwt``, ``logz``, ``information`` and ``n_eff`` reflect the
+    ``temperature`` the postprocessor was called with (likelihoods
+    divided by ``T``); ``logx``/``logp``/``sandwich``/``assignment`` and
+    the sample coordinates are temperature-independent.
     """
 
     level_logX: np.ndarray

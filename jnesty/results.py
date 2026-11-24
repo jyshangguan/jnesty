@@ -343,14 +343,17 @@ def format_nautilus_results(native):
     return Results(results_dict)
 
 
-def format_dnest_results(native):
+def format_dnest_results(native, temperature=1.0):
     """
     Build a Dynesty-compatible :class:`Results` from a DNest sampler.
 
     Uses only the native engine's public surface (``native_result`` plus
     diagnostics attributes), so it works for the real
     :class:`~jnesty.dfnest.engine.JaxDNestSampler` as well as for
-    stand-ins that provide the same attributes.
+    stand-ins that provide the same attributes.  A ``temperature``
+    different from 1 additionally requires the engine's
+    ``native_result_at_temperature`` method (stand-ins for the default
+    path do not need it).
 
     This is a *plotting bridge*, not a re-derivation of the DNest
     evidence: the native diffusive-nested-sampling semantics are
@@ -359,8 +362,8 @@ def format_dnest_results(native):
     * ``logvol`` is the native postprocessed per-sample log prior volume
       (level-sandwich order statistics), not a ``-i/nlive`` sequence;
     * ``logwt`` holds the *unnormalised* evidence weights
-      ``logp + logl`` so that ``logsumexp(logwt) == logz`` exactly, while
-      ``posterior()`` returns the normalised weights;
+      ``logp + logl / T`` so that ``logsumexp(logwt) == logz`` exactly,
+      while ``posterior()`` returns the normalised weights;
     * ``logz_trajectory`` is the cumulative log-sum in likelihood order
       (a plotting aid that ends at ``logz``);
     * there is no ``logzerr`` for a single run (CDNest reports none; the
@@ -368,11 +371,36 @@ def format_dnest_results(native):
     * ``converged`` mirrors whether the save target was reached, which is
       a run-length statement, not an evidence-convergence claim.
 
+    Three fields are included purely so the shared plotting and FITS I/O
+    layers are Dynesty-shaped; their semantics differ from the
+    Dynesty-style engine:
+
+    * ``nlive`` is the ensemble size ``num_lanes * num_particles``, a
+      *proxy* for the static-NS live-point count: diffusive nested
+      sampling has no live-point shrinkage, so this is the effective
+      number of concurrently diffusing particles, not a static-NS
+      ``nlive``;
+    * ``delta_logZ_trajectory`` is an all-NaN array with one entry per
+      saved particle: diffusive nested sampling has no per-iteration
+      convergence trajectory (the run length is set by the save budget,
+      and the opt-in delta-logZ stop is a scalar terminal statistic);
+    * ``rwalk_K`` is NaN: random-walk steps per iteration are a
+      Dynesty-style-sampler concept that does not apply to the DNest
+      engine (``diagnostics`` merely prints it as a label).
+
     Parameters
     ----------
     native : JaxDNestSampler
         A finished engine, as returned by
         :attr:`jnesty.DNestSampler.native_sampler`.
+    temperature : float, optional
+        Posterior temperature ``T >= 1`` (default 1.0).  Follows the
+        CDNest postprocessor convention: likelihoods are divided by ``T``
+        for the evidence and the weights, while level placement and the
+        prior masses always use the untempered values.  ``T = 1`` is the
+        standard posterior; ``T -> infinity`` approaches the prior
+        (weights proportional to the prior masses).  The default is
+        bit-identical to calling without the argument.
 
     Returns
     -------
@@ -380,9 +408,22 @@ def format_dnest_results(native):
         Results object with the per-sample arrays sorted by ascending
         ``(logl, tiebreaker)`` and ``NaN`` placeholders for the fields
         that only the Dynesty-style engine defines (``logzerr``,
-        ``eff``, ``delta_logz``).
+        ``eff``, ``delta_logz``, ``rwalk_K``).
     """
-    result = native.native_result
+    if isinstance(temperature, bool) or not isinstance(
+            temperature, (int, float, np.integer, np.floating)):
+        raise TypeError(
+            f'temperature must be a real number, got '
+            f'{type(temperature).__name__}')
+    temperature = float(temperature)
+    if not (np.isfinite(temperature) and temperature >= 1.0):
+        raise ValueError(
+            f'temperature must be finite and >= 1, got {temperature}')
+
+    if temperature == 1.0:
+        result = native.native_result
+    else:
+        result = native.native_result_at_temperature(temperature)
     if result is None:
         raise RuntimeError(
             'the DNest sampler has no results yet; run() must reach its '
@@ -398,7 +439,11 @@ def format_dnest_results(native):
     sample_levels = _convert_to_numpy(result.assignment)[order]
 
     # Unnormalised evidence weights: logsumexp(logwt) == logz exactly.
-    logwt = logp + logl
+    # The division by the (default 1.0) temperature is IEEE-exact, so the
+    # T = 1 weights are bit-identical to ``logp + logl``.
+    logwt = logp + logl / temperature
+    # No per-iteration convergence trajectory exists in diffusive NS.
+    delta_logz_trajectory = np.full(logl.shape[0], np.nan)
     logz_trajectory = np.logaddexp.accumulate(logwt)
 
     max_num_saves = native.max_num_saves
@@ -407,6 +452,9 @@ def format_dnest_results(native):
         'logz': float(result.logz),
         'logzerr': float('nan'),
         'logz_trajectory': logz_trajectory,
+        # All-NaN placeholder (see docstring): no per-iteration
+        # convergence trajectory exists in diffusive nested sampling.
+        'delta_logZ_trajectory': delta_logz_trajectory,
 
         # Information
         'information': float(result.information),
@@ -421,8 +469,10 @@ def format_dnest_results(native):
         'logvol': logvol,
         'sample_levels': sample_levels,
 
-        # Diagnostics (no 'nlive': diffusive nested sampling has no live
-        # point count, and the shared plotting handles its absence)
+        # Diagnostics.  'nlive' is the ensemble size (num_lanes *
+        # num_particles), a *proxy* for the static-NS live-point count:
+        # diffusive nested sampling has no live-point shrinkage.
+        'nlive': int(native.total_particles),
         'niter': int(native.n_steps),
         'n_steps': int(native.n_steps),
         'n_like': int(native.n_like),
@@ -441,6 +491,8 @@ def format_dnest_results(native):
         'completed': bool(native.completed),
         'eff': float('nan'),
         'delta_logz': float('nan'),
+        # Not applicable to the DNest engine (diagnostics label only).
+        'rwalk_K': float('nan'),
 
         # Provenance and native options
         'sampler': 'dnest',

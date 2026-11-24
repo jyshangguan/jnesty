@@ -116,6 +116,12 @@ class JaxDNestSampler:
     a run-length control, not a convergence criterion.  A dynesty-style
     ``delta_logz`` convergence stop is available as an opt-in ``run()``
     argument (off by default; the default path is unchanged).
+
+    Post-processing at a temperature ``T >= 1`` is available through
+    :meth:`native_result_at_temperature` (CDNest convention: likelihoods
+    divided by ``T`` for evidence and weights, level placement
+    untempered); the default ``T = 1`` result and the sampling path are
+    untouched by that opt-in API.
     """
 
     def __init__(self, loglikelihood, prior_transform, ndim,
@@ -205,6 +211,9 @@ class JaxDNestSampler:
         self._coord_attempts = np.zeros(self.config.ndim, dtype=np.int64)
         self._coord_accepts = np.zeros(self.config.ndim, dtype=np.int64)
         self._native_result = None
+        # Postprocess views at temperature T > 1, keyed by T; dropped
+        # whenever the canonical (T = 1) result is recomputed.
+        self._tempered_results = {}
         self._revision = 0
         self._dirty = False
         self._completed = False
@@ -345,6 +354,34 @@ class JaxDNestSampler:
             raise RuntimeError('run() must complete before posterior()')
         result = self._native_result
         return result.samples, result.logwt, result.logl
+
+    def native_result_at_temperature(self, temperature):
+        """Return the (cached) postprocess result at a temperature.
+
+        The canonical ``T = 1`` view is exactly ``native_result``.  A
+        temperature ``T > 1`` re-runs the CDNest postprocessor with
+        likelihoods divided by ``T`` for the evidence and the weights
+        (level placement and prior masses stay untempered, the CDNest
+        convention), cached per temperature so repeated calls are cheap.
+        Results are dropped automatically when the sampler continues
+        (``run()``) and the saved stream changes.
+
+        Parameters
+        ----------
+        temperature : float
+            Posterior temperature ``T >= 1``.  ``T = 1`` is the standard
+            posterior; ``T -> infinity`` approaches the prior (weights
+            proportional to the prior masses).
+
+        Returns
+        -------
+        DNestResult
+            Tempered postprocess view; ``samples``/``samples_u`` are
+            shared with the canonical result (they do not depend on
+            ``T``), while ``logz``/``logwt``/``information``/``n_eff``
+            are the tempered values.
+        """
+        return self._compute_native_result(temperature)
 
     def print_status(self, header=False):
         """One-line run status (level count, saves, evidence so far)."""
@@ -693,32 +730,96 @@ class JaxDNestSampler:
         self.count_saves += 1
         self._dirty = True
 
-    def _compute_native_result(self):
-        """Run the C-compatible postprocessor and cache the result."""
-        if not self._dirty and self._native_result is not None:
-            return
-        if self.count_saves == 0:
-            raise RuntimeError(
-                'no particles were saved; run() must reach its save target '
-                'before results are available')
+    def _compute_native_result(self, temperature=1.0):
+        """Run the C-compatible postprocessor and cache the result.
+
+        With the default ``temperature=1.0`` this computes and caches the
+        canonical CDNest result in ``native_result`` — bit-identical to
+        the pre-temperature API, and what ``run()``/``posterior()``/
+        ``native_result`` expose.  A temperature ``T > 1`` instead
+        computes the tempered view (likelihoods divided by ``T`` for the
+        evidence and weights; level placement and prior masses always
+        untempered, the CDNest postprocessor convention) and caches it in
+        ``_tempered_results`` keyed by ``T``, so repeated calls at the
+        same temperature are cheap.  Recomputing the canonical result
+        (the saved stream changed) drops every tempered view.
+
+        Parameters
+        ----------
+        temperature : float, optional
+            Posterior temperature ``T >= 1`` (default 1.0).  ``T = 1``
+            is the standard posterior; larger values flatten it towards
+            the prior.
+
+        Returns
+        -------
+        DNestResult
+            The (cached) postprocess result at the requested temperature.
+        """
+        if isinstance(temperature, bool) or not isinstance(
+                temperature, (int, float, np.integer, np.floating)):
+            raise TypeError(
+                f'temperature must be a real number, got '
+                f'{type(temperature).__name__}')
+        temperature = float(temperature)
+        if not (math.isfinite(temperature) and temperature >= 1.0):
+            raise ValueError(
+                f'temperature must be finite and >= 1, got {temperature}')
+
+        if temperature == 1.0:
+            if not self._dirty and self._native_result is not None:
+                return self._native_result
+            if self.count_saves == 0:
+                raise RuntimeError(
+                    'no particles were saved; run() must reach its save '
+                    'target before results are available')
+            # The saved stream changed since the last postprocess (or
+            # this is the first one): all tempered views are stale.
+            self._tempered_results.clear()
+            book = self._levels
+            n = book.n_levels
+            counters = {
+                'visits': book.visits[:n], 'exceeds': book.exceeds[:n],
+                'accepts': book.accepts[:n], 'tries': book.tries[:n],
+            }
+            if not book.levels_done:
+                warnings.warn(
+                    'DNest: level creation never finished (PTol unmet '
+                    'within the save budget); results are computed but '
+                    'the level set is incomplete.', stacklevel=2)
+            result = dnest_postprocess(
+                book.logX[:n], book.logl[:n], book.tie[:n],
+                np.asarray(self._saves_logl), np.asarray(self._saves_tie),
+                np.asarray(self._saves_level), level_counters=counters)
+            result.samples_u = np.stack(self._saves_u)
+            result.samples = np.asarray(self._to_physical(
+                jnp.asarray(result.samples_u), self.context))
+            self._native_result = result
+            self._dirty = False
+            self._revision += 1
+            return self._native_result
+
+        # Tempered view (T > 1): make sure the canonical snapshot exists
+        # and is fresh first — this also raises the canonical
+        # 'no results yet' error and drops stale tempered views.
+        self._compute_native_result()
+        cached = self._tempered_results.get(temperature)
+        if cached is not None:
+            return cached
         book = self._levels
         n = book.n_levels
         counters = {
             'visits': book.visits[:n], 'exceeds': book.exceeds[:n],
             'accepts': book.accepts[:n], 'tries': book.tries[:n],
         }
-        if not book.levels_done:
-            warnings.warn(
-                'DNest: level creation never finished (PTol unmet within '
-                'the save budget); results are computed but the level set '
-                'is incomplete.', stacklevel=2)
         result = dnest_postprocess(
             book.logX[:n], book.logl[:n], book.tie[:n],
             np.asarray(self._saves_logl), np.asarray(self._saves_tie),
-            np.asarray(self._saves_level), level_counters=counters)
-        result.samples_u = np.stack(self._saves_u)
-        result.samples = np.asarray(self._to_physical(
-            jnp.asarray(result.samples_u), self.context))
-        self._native_result = result
-        self._dirty = False
-        self._revision += 1
+            np.asarray(self._saves_level), temperature=temperature,
+            level_counters=counters)
+        # Sample coordinates are temperature-independent (level placement
+        # uses the untempered likelihood): reuse the canonical arrays.
+        result.samples_u = self._native_result.samples_u
+        result.samples = self._native_result.samples
+        self._tempered_results[temperature] = result
+        return result

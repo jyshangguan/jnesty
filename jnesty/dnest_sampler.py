@@ -28,6 +28,16 @@ The engine's only dependency is JAX itself (already a core dependency of
 jnesty), so unlike the Nautilus engine there is no optional extra to
 install.  Constructing a ``DNestSampler`` enables JAX float64 mode
 process-wide; plain ``import jnesty`` does not import the engine.
+
+Post-processing at a temperature ``T >= 1`` (CDNest convention:
+likelihoods divided by ``T`` for the evidence and weights, level
+placement untempered) is available as an opt-in API:
+:meth:`DNestSampler.results_at_temperature` returns a full
+plotting-compatible :class:`~jnesty.results.Results` view at ``T``, and
+:meth:`DNestSampler.posterior_at_temperature` the corresponding
+``(points, log_w, log_l)`` triple.  ``T = 1`` reproduces the standard
+posterior exactly; the default ``to_results()``/``posterior()`` paths
+are unchanged.
 """
 
 import math
@@ -255,6 +265,68 @@ class DNestSampler:
         """
         from .results import format_dnest_results
         return format_dnest_results(self._native)
+
+    def results_at_temperature(self, temperature):
+        """Build a Dynesty-style :class:`~jnesty.results.Results` view
+        at a posterior temperature.
+
+        Same bridge as :meth:`to_results` (including the
+        ``nlive``/``delta_logZ_trajectory``/``rwalk_K`` compatibility
+        fields), but with the evidence, weights, ``logz_trajectory``,
+        information and effective sample size computed at temperature
+        ``T``: the CDNest postprocessor convention divides likelihoods
+        by ``T`` for the evidence and weights while level placement and
+        prior masses stay untempered.  The engine caches the underlying
+        postprocess result per temperature, so repeated calls at the
+        same ``T`` are cheap.
+
+        Parameters
+        ----------
+        temperature : float
+            Posterior temperature ``T >= 1``.  ``T = 1`` returns exactly
+            the :meth:`to_results` view (bit-identical); ``T -> infinity``
+            approaches the prior (weights proportional to the prior
+            masses).
+
+        Returns
+        -------
+        Results
+            Plotting-compatible results at temperature ``T``; ``logl``
+            and ``samples`` remain the untempered saved values (the
+            temperature enters through ``logwt``/``logz``).
+
+        Examples
+        --------
+        >>> res_hot = sampler.results_at_temperature(2.0)
+        >>> _ = plotting.runplot(res_hot)
+        """
+        from .results import format_dnest_results
+        return format_dnest_results(self._native, temperature)
+
+    def posterior_at_temperature(self, temperature):
+        """Return the posterior sample estimate at a temperature.
+
+        Returns ``(points, log_w, log_l)``: physical-space samples in
+        native save order (identical to :meth:`posterior` — the sample
+        coordinates do not depend on ``T``), temperature-``T`` posterior
+        log-weights normalised so that ``logsumexp(log_w) == 0``, and
+        the *untempered* saved log-likelihoods (CDNest applies
+        ``logl / T`` only to the weights).
+
+        Parameters
+        ----------
+        temperature : float
+            Posterior temperature ``T >= 1``; see
+            :meth:`results_at_temperature`.
+
+        Returns
+        -------
+        tuple
+            ``(points, log_w, log_l)`` with the temperature-``T``
+            weights.
+        """
+        result = self._native.native_result_at_temperature(temperature)
+        return result.samples, result.logwt, result.logl
 
     @property
     def results(self):
