@@ -13,6 +13,8 @@ of CDNest's ``src/dnest.c`` (commit ``3aaa039f9a0a...``):
 * :func:`renormalise_visits` -- cap the counter histories once level
   creation finishes (with CDNest's ``+1`` smoothing and truncation).
 * :func:`kill_probabilities` -- the lagging-particle kill probabilities.
+* :func:`delta_log_z_estimate` -- the opt-in dynesty-style stopping
+  statistic (remaining evidence ratio from the level structure alone).
 """
 
 import math
@@ -23,7 +25,8 @@ import numpy as np
 from .state import LEVEL_NUM_MAX
 
 __all__ = ['enough_levels', 'create_level', 'recalculate_log_X',
-           'renormalise_visits', 'kill_probabilities', 'log_push_of']
+           'renormalise_visits', 'kill_probabilities', 'log_push_of',
+           'delta_log_z_estimate']
 
 
 def enough_levels(level_logl, n_levels, max_num_levels, ptol):
@@ -181,3 +184,98 @@ def kill_probabilities(push):
     with np.errstate(over='ignore'):
         rate = 1.0 - 1.0 / (1.0 + np.exp(-push - 4.0))
     return rate ** 3
+
+
+def delta_log_z_estimate(level_logX, level_logl, logl_max):
+    """Remaining-evidence ratio for the opt-in delta-logZ stopping rule.
+
+    Implements the dynesty-style stopping statistic adapted to a diffusive
+    nested sampling level book::
+
+        delta = logaddexp(0, logl_max + logX_tail - logz_running)
+
+    where ``logX_tail = level_logX[-1]`` is the *learned prior volume of the
+    last (highest-threshold) level*: every point with likelihood above the
+    highest threshold lives inside prior volume ``exp(logX_tail)``, so this
+    is the level-book quantity that bounds the unexplored volume, and the
+    maximum conceivable evidence contribution of that region is
+    ``exp(logl_max + logX_tail)``.
+
+    ``logz_running`` is a cheap, deliberately *conservative* (low-biased)
+    estimate of the current evidence derived from the level structure alone
+    -- the CDNest postprocessor is O(n_saves) and must not run per block:
+
+    * the shell between thresholds ``i-1`` and ``i`` has volume
+      ``exp(logX[i-1]) - exp(logX[i])`` and likelihood within
+      ``[logl[i-1], logl[i]]``; it is counted at its *lower* bound
+      ``logl[i-1]`` (the first shell, whose lower bound is level 0's
+      ``-inf`` threshold, drops out entirely);
+    * the last level's region is counted at its threshold likelihood,
+      ``logX[-1] + logl[-1]``.
+
+    A level spans a factor-``compression`` volume slice, so the per-shell
+    likelihood curvature biases ``logz_running`` low by O(1) nat.  That is
+    the safe direction for a stop decision: an underestimated current
+    evidence inflates ``delta`` and delays stopping.  The estimator does
+    not see the order-statistic noise of the saved particles, which is why
+    the engine also enforces a minimum save floor before stopping.
+
+    Parameters
+    ----------
+    level_logX, level_logl : array-like (n_levels,)
+        Learned level prior volumes (non-increasing) and log-likelihood
+        thresholds (non-decreasing), as maintained by the
+        :class:`~jnesty.dfnest.state.LevelBook`.
+    logl_max : float
+        The maximum log-likelihood seen so far (running max over the live
+        particles); may be ``-inf`` for a degenerate all-rejected run.
+
+    Returns
+    -------
+    delta : float
+        ``log(1 + Z_tail_max / Z_running)``; ``+inf`` when the running
+        evidence cannot be bounded (degenerate books, e.g. a single level
+        or an all-``-inf`` likelihood), meaning "do not stop".
+    logz_running : float
+        The conservative running evidence estimate described above.
+
+    Notes
+    -----
+    All computations are O(n_levels) float64 NumPy with no random numbers,
+    so calling this once per bookkeeping cycle never perturbs the sampling
+    trajectory.
+    """
+    logX = np.asarray(level_logX, dtype=np.float64)
+    logl = np.asarray(level_logl, dtype=np.float64)
+    logl_max = float(logl_max)
+    if logX.ndim != 1 or logl.ndim != 1:
+        raise ValueError('level_logX and level_logl must be 1-D arrays')
+    if logX.shape[0] != logl.shape[0]:
+        raise ValueError('level_logX and level_logl must have equal length')
+    n = logX.shape[0]
+    if n < 1:
+        raise ValueError('delta_log_z_estimate needs at least one level')
+
+    # Shell volumes between consecutive thresholds (logX is strictly
+    # decreasing in a live book; ties give a zero-volume shell).
+    if n > 1:
+        with np.errstate(divide='ignore'):
+            shell_logv = logX[:-1] + np.log1p(-np.exp(logX[1:] - logX[:-1]))
+        terms = shell_logv + logl[:-1]
+    else:
+        terms = np.zeros(0, dtype=np.float64)
+
+    # Tail region counted at its threshold likelihood (lower bound).
+    tail_lower = float(logX[n - 1]) + float(logl[n - 1])
+    logz_running = float(np.logaddexp.reduce(
+        np.concatenate([terms, np.array([tail_lower])])))
+
+    logx_tail = float(logX[n - 1])
+    if (not math.isfinite(logz_running)) or (logl_max == -math.inf):
+        # logz_running == -inf (no usable shells) or no finite likelihood
+        # yet: the remaining evidence cannot be bounded; never stop.
+        return math.inf, logz_running
+    delta = float(np.logaddexp(0.0, logl_max + logx_tail - logz_running))
+    if math.isnan(delta):
+        return math.inf, logz_running
+    return delta, logz_running

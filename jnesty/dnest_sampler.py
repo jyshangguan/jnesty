@@ -16,7 +16,9 @@ above-threshold records with a fixed compression, level prior volumes are
 *learned* from visit/exceed statistics, particles diffuse across levels
 with a heavy-tailed level proposal, and the run stops after
 ``max_num_saves`` saved particles (a run-length control, not an evidence
-convergence criterion).  Evidence, information and posterior weights
+convergence criterion; an opt-in Dynesty-style ``delta_logZ`` convergence
+stop is available as a :meth:`DNestSampler.run` argument and is off by
+default).  Evidence, information and posterior weights
 follow CDNest's C postprocessor.  There is no Dynesty-style ``logzerr``
 for a single run; the uncertainty proxy is the entropy effective sample
 size ``n_eff``, and CDNest's own recommendation for evidence scatter is
@@ -145,7 +147,8 @@ class DNestSampler:
     # ------------------------------------------------------------------
     # native API
     # ------------------------------------------------------------------
-    def run(self, max_num_saves=10000, ptol=None, verbose=False):
+    def run(self, max_num_saves=10000, ptol=None, verbose=False,
+            delta_logZ=None):
         """Run the sampler until ``max_num_saves`` particles are saved.
 
         A larger target than already saved continues the native state
@@ -157,16 +160,41 @@ class DNestSampler:
         float
             The natural-log evidence ``log_z``.
 
+        Parameters
+        ----------
+        max_num_saves : int, optional
+            Total save target (default 10000).
+        ptol : float or None, optional
+            Overrides the level-creation PTol for subsequent bookkeeping.
+        verbose : bool, optional
+            Print level-creation and progress lines.
+        delta_logZ : float or None, optional
+            Opt-in Dynesty-style stopping criterion (default ``None``).
+            When set (e.g. ``0.05``), the run may stop early once level
+            creation has finished, a minimum save floor was reached and
+            the estimated remaining-evidence ratio
+            ``delta = logaddexp(0, logl_max + logX_tail - logZ_running)``
+            dropped below ``delta_logZ``; ``logX_tail`` is the learned
+            prior volume of the last level and ``logZ_running`` a cheap
+            conservative estimate from the level structure (see
+            :func:`jnesty.dfnest.levels.delta_log_z_estimate`).  The save
+            budget still caps the run if the criterion never fires.  A
+            run stopped this way reports ``delta_logz_stopped`` and can be
+            continued with a later ``run()``.
+
         Notes
         -----
         ``max_num_saves`` is a run-length control in the spirit of CDNest,
         not an evidence-convergence criterion: diffusive nested sampling
         stops when its save budget is spent.  ``ptol`` only controls when
         level *creation* finishes; after that the sampler diffuses across
-        the finished level set for the remaining budget.
+        the finished level set for the remaining budget.  ``delta_logZ``
+        adds the opt-in convergence stop on top; with ``None`` (the
+        default) the sampling path is bit-identical to a run without the
+        argument.
         """
         return self._native.run(max_num_saves=max_num_saves, ptol=ptol,
-                                verbose=verbose)
+                                verbose=verbose, delta_logz=delta_logZ)
 
     def posterior(self):
         """Return the posterior sample estimate.
@@ -202,6 +230,9 @@ class DNestSampler:
                   + ', '.join(f'{a}/{c} ({r:.0%})' for a, c, r in
                               zip(att, native.coordinate_accepts, rate)))
         print(f"Save target reached: {native.completed}")
+        if native.delta_logz_stopped:
+            print(f"Delta-logZ stop: yes (delta logZ = "
+                  f"{native.last_delta_logz:.3g} at {native.n_saves} saves)")
         print('=' * 70)
 
     # ------------------------------------------------------------------

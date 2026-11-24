@@ -59,13 +59,16 @@ class FakeJaxDNestSampler:
         self.sample_frequency = np.ones(ndim) / ndim
         self.coordinate_attempts = np.arange(ndim) * 10
         self.coordinate_accepts = np.arange(ndim) * 4
+        self.delta_logz_stopped = False
+        self.last_delta_logz = None
         self.native_result = None
         self.config = types.SimpleNamespace(ndim=ndim)
 
-    def run(self, max_num_saves=10000, ptol=None, verbose=False):
+    def run(self, max_num_saves=10000, ptol=None, verbose=False,
+            delta_logz=None):
         self.run_calls.append(
             {'max_num_saves': max_num_saves, 'ptol': ptol,
-             'verbose': verbose})
+             'verbose': verbose, 'delta_logz': delta_logz})
         if self.max_num_saves is not None:
             self.max_num_saves = max(max_num_saves, self.max_num_saves)
         return -1.23
@@ -143,11 +146,27 @@ def test_run_delegation(fake_engine):
     native = sampler.native_sampler
     assert sampler.run(max_num_saves=77, ptol=0.05, verbose=True) == -1.23
     (call,) = native.run_calls
-    assert call == {'max_num_saves': 77, 'ptol': 0.05, 'verbose': True}
+    assert call == {'max_num_saves': 77, 'ptol': 0.05, 'verbose': True,
+                    'delta_logz': None}
     # Defaults match the documented CDNest values.
     sampler.run()
     assert native.run_calls[1] == {
-        'max_num_saves': 10000, 'ptol': None, 'verbose': False}
+        'max_num_saves': 10000, 'ptol': None, 'verbose': False,
+        'delta_logz': None}
+
+
+def test_run_delta_logz_delegation(fake_engine):
+    loglikelihood, prior_transform = _problem()
+    sampler = jnesty.DNestSampler(loglikelihood, prior_transform, ndim=2)
+    native = sampler.native_sampler
+    assert sampler.run(max_num_saves=77, delta_logZ=0.05) == -1.23
+    (call,) = native.run_calls
+    # The adapter exposes the dynesty-style spelling; the native engine
+    # receives the snake_case one.
+    assert call == {'max_num_saves': 77, 'ptol': None, 'verbose': False,
+                    'delta_logz': 0.05}
+    assert sampler.run(delta_logZ=0.5) == -1.23
+    assert native.run_calls[1]['delta_logz'] == 0.5
 
 
 def test_posterior_delegation(fake_engine):
@@ -202,6 +221,22 @@ def test_print_summary_before_run(fake_engine, capsys):
     sampler.print_summary()
     out = capsys.readouterr().out
     assert 'no results yet' in out
+
+
+def test_print_summary_delta_logz_stop_line(fake_engine, capsys):
+    loglikelihood, prior_transform = _problem()
+    sampler = jnesty.DNestSampler(loglikelihood, prior_transform, ndim=2)
+    native = sampler.native_sampler
+    native.native_result = types.SimpleNamespace(
+        logz=-2.5, n_eff=100.0, information=1.5)
+    native.coordinate_attempts = np.zeros(2)  # skip the coordinate block
+    native.completed = False  # a delta-stopped run misses its save target
+    native.delta_logz_stopped = True
+    native.last_delta_logz = 0.031
+    sampler.print_summary()
+    out = capsys.readouterr().out
+    assert 'Save target reached: False' in out
+    assert 'Delta-logZ stop: yes (delta logZ = 0.031 at 50 saves)' in out
 
 
 def test_top_level_export():

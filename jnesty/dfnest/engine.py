@@ -25,7 +25,10 @@ Notes on parity-faithful details
   happen at most once per block (CDNest's single ``if``, not a catch-up
   loop).
 * The run length is ``max_num_saves``; ``ptol`` only stops level creation.
-  There is no delta-logZ stopping rule and no per-run evidence error.
+  There is no per-run evidence error.  An *opt-in* dynesty-style delta-logZ
+  stopping rule is available through ``run(delta_logz=...)``
+  (:func:`jnesty.dfnest.levels.delta_log_z_estimate`); it is off unless
+  requested and never changes the default sampling path.
 """
 
 import math
@@ -43,6 +46,17 @@ from .postprocess import DNestResult, dnest_postprocess
 from .state import DNestConfig, LaneState, LevelBook, resolve_config
 
 __all__ = ['JaxDNestSampler']
+
+#: Minimum number of saved particles before the opt-in delta-logZ stop may
+#: fire.  The stopping statistic bounds the *unexplored* evidence, not the
+#: order-statistic noise of the saved stream, so a floor keeps small save
+#: counts from tripping it.  Validation on the T2 analytic problems
+#: (task_004_dnest_stop): the postprocessed logZ still swings by ~0.2 nat
+#: at a few hundred saves (worst: gaussian20, |logZ(300) - logZ(8000)| =
+#: 0.22) but is within 0.03 nat of its 8000-save value from ~800 saves on,
+#: for every tested problem and dimension; 800 also stays well inside the
+#: regime the T2 bench found evidence-tight (2000 saves).
+DELTA_LOGZ_MIN_SAVES = 800
 
 
 class JaxDNestSampler:
@@ -99,7 +113,9 @@ class JaxDNestSampler:
     Constructing a sampler enables JAX float64 mode process-wide (CDNest
     computes in double precision); the same caveat as the Nautilus engine
     applies.  The run stops at ``max_num_saves`` saved particles; this is
-    a run-length control, not a convergence criterion.
+    a run-length control, not a convergence criterion.  A dynesty-style
+    ``delta_logz`` convergence stop is available as an opt-in ``run()``
+    argument (off by default; the default path is unchanged).
     """
 
     def __init__(self, loglikelihood, prior_transform, ndim,
@@ -193,11 +209,19 @@ class JaxDNestSampler:
         self._dirty = False
         self._completed = False
         self._last_target = None
+        # Opt-in delta-logZ stopping state (inert unless delta_logz is
+        # passed to run(); the tracker is a read-only max over the live
+        # particles and consumes no randomness).
+        self._logl_max = -math.inf
+        self._track_logl_max = False
+        self._delta_logz_stopped = False
+        self._last_delta_logz = None
 
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
-    def run(self, max_num_saves=10000, ptol=None, verbose=False):
+    def run(self, max_num_saves=10000, ptol=None, verbose=False,
+            delta_logz=None):
         """Run the sampler until ``max_num_saves`` particles are saved.
 
         A larger target than the current save count continues the native
@@ -215,6 +239,25 @@ class JaxDNestSampler:
             Overrides the level-creation PTol for subsequent bookkeeping.
         verbose : bool, optional
             Print level-creation and progress lines.
+        delta_logz : float or None, optional
+            Opt-in dynesty-style stopping criterion (default ``None``,
+            i.e. run to the save budget exactly as CDNest does).  When set,
+            the run may stop once (a) level creation has finished, (b) at
+            least :data:`DELTA_LOGZ_MIN_SAVES` particles were saved, and
+            (c) the estimated remaining-evidence ratio
+            ``delta = logaddexp(0, logl_max + logX_tail - logZ_running)``
+            dropped below ``delta_logz``; see
+            :func:`jnesty.dfnest.levels.delta_log_z_estimate`.  The budget
+            cap still applies if the criterion never fires.
+
+        Notes
+        -----
+        ``delta_logz=None`` (the default) leaves the sampling path
+        bit-identical to a run without this argument: the statistic is a
+        read-only function of the level book and never consumes
+        randomness.  A run stopped by the criterion reports
+        ``delta_logz_stopped`` and keeps its state, so a later ``run()``
+        with a larger budget continues the chain.
         """
         if isinstance(max_num_saves, bool) or not isinstance(
                 max_num_saves, (int, np.integer)):
@@ -232,6 +275,15 @@ class JaxDNestSampler:
             if not (math.isfinite(ptol) and ptol > 0):
                 raise ValueError(f'ptol must be finite and > 0, got {ptol}')
             self.ptol = ptol
+        if delta_logz is not None:
+            if isinstance(delta_logz, bool) or not isinstance(
+                    delta_logz, (int, float, np.integer, np.floating)):
+                raise TypeError('delta_logz must be a real number or None')
+            delta_logz = float(delta_logz)
+            if not (math.isfinite(delta_logz) and delta_logz > 0):
+                raise ValueError(
+                    f'delta_logz must be finite and > 0, got {delta_logz}')
+            self._track_logl_max = True
 
         self._last_target = max_num_saves
 
@@ -245,11 +297,14 @@ class JaxDNestSampler:
                     'log-likelihoods; check loglikelihood/prior_transform')
             self._particles = state
             self._n_like += self.config.total_particles
+            if self._track_logl_max:
+                self._logl_max = max(self._logl_max, float(logl0.max()))
             self._dirty = True
 
         target = max(self.count_saves, max_num_saves)
         if target > self.count_saves:
             self._completed = False
+            self._delta_logz_stopped = False
             progress_every = 50
             while self.count_saves < target:
                 self._run_block()
@@ -257,9 +312,20 @@ class JaxDNestSampler:
                 if (self.count_mcmc_steps
                         >= (self.count_saves + 1) * self.config.save_interval):
                     self._save_particle()
+                if (delta_logz is not None
+                        and self._delta_logz_converged(delta_logz)):
+                    self._delta_logz_stopped = True
+                    if verbose:
+                        print(f'DNest: delta-logZ stop at saves='
+                              f'{self.count_saves} (delta logZ = '
+                              f'{self._last_delta_logz:.4g} < '
+                              f'{delta_logz:g}); save target {target} '
+                              'not reached.')
+                    break
                 if verbose and self.n_blocks % progress_every == 0:
                     self.print_status()
-            self._completed = True
+            if not self._delta_logz_stopped:
+                self._completed = True
             if verbose:
                 self.print_status()
         elif verbose and self.count_saves:
@@ -353,6 +419,16 @@ class JaxDNestSampler:
         return self._completed
 
     @property
+    def delta_logz_stopped(self):
+        """Whether the last ``run()`` stopped via the delta-logZ criterion."""
+        return self._delta_logz_stopped
+
+    @property
+    def last_delta_logz(self):
+        """The stopping statistic at the most recent check (or None)."""
+        return self._last_delta_logz
+
+    @property
     def max_num_saves(self):
         """The most recent save target."""
         return self._last_target
@@ -430,6 +506,26 @@ class JaxDNestSampler:
     # ------------------------------------------------------------------
     # internals: block execution, bookkeeping, saves, kills, results
     # ------------------------------------------------------------------
+    def _delta_logz_converged(self, delta_logz):
+        """Gate + estimate for the opt-in delta-logZ stop (run loop only).
+
+        Returns True when the run may stop: level creation finished, the
+        minimum save floor was reached and the remaining-evidence ratio
+        dropped below ``delta_logz``.  Non-finite estimates (degenerate
+        level books) never stop the run; the budget cap then applies.
+        """
+        if (self.count_saves < DELTA_LOGZ_MIN_SAVES
+                or not self._levels.levels_done):
+            return False
+        book = self._levels
+        n = book.n_levels
+        delta, _ = level_ops.delta_log_z_estimate(
+            book.logX[:n], book.logl[:n], self._logl_max)
+        self._last_delta_logz = delta
+        if not math.isfinite(delta):
+            return False
+        return delta < delta_logz
+
     def _run_block(self):
         cfg = self.config
         book = self._levels
@@ -463,6 +559,13 @@ class JaxDNestSampler:
                 f'step {int(step)} of block {self.n_blocks + 1}; the '
                 'proposal was rejected, but the likelihood is ill-defined '
                 'at that point')
+
+        # Running maximum log-likelihood for the opt-in delta-logZ stop
+        # (read-only transfer; no RNG is consumed either way).
+        if self._track_logl_max:
+            live_max = float(np.asarray(state.logl).max())
+            if live_max > self._logl_max:
+                self._logl_max = live_max
 
         # Aggregate lane-local counters into the global level array
         # (CDNest: levels_combine += sum of worker increments).
