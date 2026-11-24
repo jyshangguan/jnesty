@@ -106,7 +106,7 @@ class TestVmapQueueRefill:
 class TestQueueRefillDirectionWeights:
     """Per-coordinate rwalk weights reach the queue-refill walk kernel."""
 
-    def _refill(self, w_sq, ndim=3, queue_size=16):
+    def _refill(self, w_p, ndim=3, queue_size=16):
         nlive = 50
         key = random.PRNGKey(0)
         live_x = random.uniform(key, (nlive, ndim))
@@ -116,10 +116,10 @@ class TestQueueRefillDirectionWeights:
             _loglik_gaussian,
             jnp.zeros((1, ndim, ndim)), jnp.array([-jnp.inf]),
             jnp.eye(ndim), 1.0, 20, ndim, ndim, queue_size, False, None,
-            direction_weights_sqrt=w_sq)
+            direction_weights_p=w_p)
 
     def test_output_shapes_with_weights(self):
-        qx, ql, qna, qnt = self._refill(jnp.sqrt(jnp.array([4.0, 1.0, 1.0])))
+        qx, ql, qna, qnt = self._refill(jnp.array([1.0, 0.25, 0.25]))
         assert qx.shape == (16, 3)
         assert ql.shape == (16,)
         assert jnp.all(jnp.isfinite(ql))
@@ -128,7 +128,7 @@ class TestQueueRefillDirectionWeights:
     def test_weights_change_the_candidates(self):
         """Forwarding proof: same key, weights on -> different candidates."""
         qx_ref, *_ = self._refill(None)
-        qx_w, *_ = self._refill(jnp.sqrt(jnp.array([4.0, 1.0, 1.0])))
+        qx_w, *_ = self._refill(jnp.array([1.0, 0.25, 0.25]))
         assert not np.allclose(np.asarray(qx_ref), np.asarray(qx_w))
 
     def test_uniform_weights_bit_identical_to_default(self):
@@ -140,5 +140,5 @@ class TestQueueRefillDirectionWeights:
 
     def test_step_budget_unchanged_with_weights(self):
         _, _, _, qnt_ref = self._refill(None)
-        _, _, _, qnt_w = self._refill(jnp.sqrt(jnp.array([9.0, 1.0, 1.0])))
+        _, _, _, qnt_w = self._refill(jnp.array([1.0, 1.0 / 9.0, 1.0 / 9.0]))
         np.testing.assert_array_equal(np.asarray(qnt_ref), np.asarray(qnt_w))

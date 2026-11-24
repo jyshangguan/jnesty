@@ -113,22 +113,33 @@ class TestFactory:
 
 
 class TestRWalkDirectionWeights:
-    """Opt-in per-coordinate sampling weights for the rwalk kernel."""
+    """Opt-in Bernoulli coordinate selection (rwalk_direction_weights).
 
-    def test_constructor_normalizes_to_mean_one(self):
-        s = RWalkSampler(ndim=3, rwalk_direction_weights=[8.0, 2.0, 1.0])
+    Semantics (task_006): per walk step, clustered coordinate i is
+    selected with probability w_i; unselected coordinates stay put and
+    the selected ones keep their natural isotropic magnitude (the
+    component they would have had in an unweighted draw).  Weights are
+    selection probabilities in
+    (0, 1] with at least one anchor equal to exactly 1 (no
+    normalization).
+    """
+
+    # --- constructor validation (strict, no normalization) ---
+
+    def test_constructor_stores_weights_unchanged(self):
+        s = RWalkSampler(ndim=3, rwalk_direction_weights=[1.0, 0.25, 0.04])
         w = s.rwalk_direction_weights
         assert w.shape == (3,)
-        np.testing.assert_allclose(float(jnp.mean(w)), 1.0, rtol=1e-6)
-        expected = np.array([8.0, 2.0, 1.0]) / (11.0 / 3.0)
-        np.testing.assert_allclose(np.asarray(w), expected, rtol=1e-6)
-        np.testing.assert_allclose(np.asarray(s.rwalk_direction_weights_sqrt),
-                                   np.sqrt(expected), rtol=1e-6)
+        # No normalization: the w=1 anchor IS the reference.
+        np.testing.assert_allclose(np.asarray(w), [1.0, 0.25, 0.04],
+                                   rtol=1e-6)
+        np.testing.assert_array_equal(
+            np.asarray(s.rwalk_direction_weights_p), np.asarray(w))
 
     def test_constructor_none_default(self):
         s = RWalkSampler(ndim=3)
         assert s.rwalk_direction_weights is None
-        assert s.rwalk_direction_weights_sqrt is None
+        assert s.rwalk_direction_weights_p is None
 
     @pytest.mark.parametrize("bad", [
         [0.0, 1.0, 1.0],
@@ -142,78 +153,120 @@ class TestRWalkDirectionWeights:
         with pytest.raises(ValueError, match="rwalk_direction_weights"):
             RWalkSampler(ndim=3, rwalk_direction_weights=bad)
 
+    def test_constructor_rejects_probability_above_one(self):
+        with pytest.raises(ValueError,
+                           match=r"selection probabilities in \(0, 1\]"):
+            RWalkSampler(ndim=3, rwalk_direction_weights=[1.0, 2.0, 1.0])
+
+    def test_constructor_rejects_missing_anchor(self):
+        with pytest.raises(ValueError, match="no anchor"):
+            RWalkSampler(ndim=3, rwalk_direction_weights=[0.5, 0.5, 0.5])
+
+    def test_constructor_requires_clustered_anchor(self):
+        # 0 < ncdim < ndim: the only w=1 anchor sits in the non-clustered
+        # block, so the clustered selection mask could be all-zero.
+        with pytest.raises(ValueError, match="anchor among the clustered"):
+            RWalkSampler(ndim=3, ncdim=2,
+                         rwalk_direction_weights=[0.5, 0.5, 1.0])
+
+    def test_constructor_accepts_clustered_anchor(self):
+        s = RWalkSampler(ndim=3, ncdim=2,
+                         rwalk_direction_weights=[1.0, 0.5, 0.5])
+        np.testing.assert_allclose(
+            np.asarray(s.rwalk_direction_weights_p), [1.0, 0.5, 0.5],
+            rtol=1e-6)
+
     def test_get_sampler_accepts_weights(self):
         s = get_sampler('rwalk', ndim=3,
-                        rwalk_direction_weights=[1.0, 2.0, 3.0])
-        np.testing.assert_allclose(float(jnp.mean(s.rwalk_direction_weights)),
-                                   1.0, rtol=1e-6)
+                        rwalk_direction_weights=[1.0, 0.5, 0.25])
+        np.testing.assert_allclose(
+            np.asarray(s.rwalk_direction_weights_p), [1.0, 0.5, 0.25],
+            rtol=1e-6)
 
-    def test_proposal_variance_scales_with_weight(self):
-        # Displacement variance along coordinate i is w_i * Var(ball draw);
-        # the ball draw has Var(dr_i) = 1/(ndim+2) in every coordinate.
+    # --- kernel semantics: diffusion-rate (sqrt-w) scaling ---
+
+    def test_exploration_rate_matches_weights(self):
+        # Diffusion-rate semantics: over thousands of proposals with the
+        # SAME keys, the per-coordinate displacement variance equals
+        # w_i times the unweighted variance (displacement ~ sqrt(w_i) x
+        # the unweighted draw), and the anchor (w=1) reproduces the
+        # unweighted draw exactly.
         ndim = 3
-        w_sq = jnp.sqrt(jnp.array([4.0, 1.0, 1.0]))
+        w = np.array([1.0, 0.5, 0.25])
+        w_p = jnp.asarray(w)
         x = jnp.full((ndim,), 0.5)
         keys = random.split(random.PRNGKey(123), 4000)
-        props = jax.vmap(lambda k: _propose_one(
-            k, x, jnp.eye(ndim), 1.0, ndim, ndim, None, 0, w_sq)[0])(keys)
-        disp = np.asarray(props) - 0.5
-        var = disp.var(axis=0)
-        np.testing.assert_allclose(var[0] / var[1], 4.0, rtol=0.15)
-        np.testing.assert_allclose(var[1] / var[2], 1.0, rtol=0.15)
-        # zero-mean (symmetric) proposal in every coordinate
-        assert np.all(np.abs(disp.mean(axis=0)) < 0.05)
-
-    def test_proposal_weights_compose_after_axes(self):
-        ndim = 3
-        w_sq = jnp.sqrt(jnp.array([4.0, 1.0, 1.0]))
-        x = jnp.full((ndim,), 0.5)
-        axes = 2.0 * jnp.eye(ndim)
-        k = random.PRNGKey(7)
-        u_ref, _ = _propose_one(k, x, axes, 1.0, ndim, ndim, None, 0)
-        u_w, _ = _propose_one(k, x, axes, 1.0, ndim, ndim, None, 0, w_sq)
-        np.testing.assert_allclose(
-            np.asarray(u_w - x),
-            np.asarray(u_ref - x) * np.sqrt([4.0, 1.0, 1.0]),
-            rtol=1e-5)
+        ref = np.asarray(jax.vmap(lambda k: _propose_one(
+            k, x, jnp.eye(ndim), 1.0, ndim, ndim, None, 0)[0])(keys)) - 0.5
+        wtd = np.asarray(jax.vmap(lambda k: _propose_one(
+            k, x, jnp.eye(ndim), 1.0, ndim, ndim, None, 0, w_p)[0])(keys)) - 0.5
+        # Anchor coordinate: exactly the unweighted draw (sqrt(1) = 1).
+        np.testing.assert_array_equal(wtd[:, 0], ref[:, 0])
+        # Weighted coordinates: elementwise sqrt(w) times the same draw.
+        for i in (1, 2):
+            np.testing.assert_allclose(wtd[:, i], np.sqrt(w[i]) * ref[:, i],
+                                       rtol=1e-5, atol=1e-7)
+        # Variance ratio == w (the exploration-rate statement).
+        var_ref = ref.var(axis=0)
+        var_w = wtd.var(axis=0)
+        for i in (1, 2):
+            np.testing.assert_allclose(var_w[i] / var_ref[i], w[i],
+                                       rtol=1e-5)
 
     def test_non_clustered_dims_ignore_weights(self):
         ndim = 3
         n_cluster = 2
-        w_sq = jnp.sqrt(jnp.array([9.0, 1.0, 1.0]))
+        w_p = jnp.array([1.0, 0.25, 1.0])
         x = jnp.full((ndim,), 0.5)
-        k = random.PRNGKey(11)
-        u_ref, _ = _propose_one(k, x, None, 1.0, n_cluster, ndim, None, 0)
-        u_w, _ = _propose_one(k, x, None, 1.0, n_cluster, ndim, None, 0,
-                              w_sq)
-        # Non-clustered coordinate: same subkey, same shape -> bit-identical
-        np.testing.assert_array_equal(np.asarray(u_w[2]), np.asarray(u_ref[2]))
-        # Clustered coordinate 0 moved 3x further (sqrt(9))
-        np.testing.assert_allclose(
-            float(u_w[0] - x[0]), 3.0 * float(u_ref[0] - x[0]), rtol=1e-5)
+        keys = random.split(random.PRNGKey(11), 512)
+        ref = np.asarray(jax.vmap(lambda k: _propose_one(
+            k, x, None, 1.0, n_cluster, ndim, None, 0)[0])(keys))
+        wtd = np.asarray(jax.vmap(lambda k: _propose_one(
+            k, x, None, 1.0, n_cluster, ndim, None, 0, w_p)[0])(keys))
+        # Non-clustered coordinate: same subkey -> bit-identical stream.
+        np.testing.assert_array_equal(wtd[:, 2], ref[:, 2])
+        # Clustered coordinates move at every proposal; the down-weighted
+        # one at sqrt(w) magnitude (variance rate w = 0.25).
+        assert np.mean(wtd[:, 0] != 0.5) == 1.0
+        assert np.mean(ref[:, 0] != 0.5) == 1.0
+        assert np.mean(wtd[:, 1] != 0.5) == 1.0
+        var_ref = (ref[:, 1] - 0.5).var()
+        var_w = (wtd[:, 1] - 0.5).var()
+        np.testing.assert_allclose(var_w / var_ref, 0.25, rtol=1e-4)
 
-    def test_uniform_sqrt_weights_are_bit_identical(self, key,
-                                                     gaussian_loglikelihood):
+    def test_all_ones_weights_bit_identical_to_none(self, key,
+                                                    gaussian_loglikelihood):
+        # All-ones weights select every coordinate every step, but the
+        # extra mask multiply can shift XLA kernel fusion by ~1 ulp
+        # inside lax.scan (measured).  RWalkSampler therefore collapses
+        # all-ones to the exact off path, which makes the feature-level
+        # guarantee bit-identity by construction.
         ndim = 3
+        s = RWalkSampler(ndim=ndim, rwalk_direction_weights=[1.0] * ndim)
+        assert s.rwalk_direction_weights is None
+        assert s.rwalk_direction_weights_p is None
+        # Kernel level: the same-draw walk with raw ones weights stays
+        # within one ulp of the unweighted walk (documented fusion drift,
+        # never reachable through the public API after the collapse).
         x = jnp.full((ndim,), 0.5)
         args = (key, x, -jnp.inf, gaussian_loglikelihood, jnp.eye(ndim),
                 0.1, 25, ndim, ndim, None, None)
         x_none, _, _ = _single_walk(*args)
-        x_ones, _, _ = _single_walk(*args,
-                                    direction_weights_sqrt=jnp.ones(ndim))
-        np.testing.assert_array_equal(np.asarray(x_none), np.asarray(x_ones))
+        x_ones, _, _ = _single_walk(*args, direction_weights_p=jnp.ones(ndim))
+        np.testing.assert_allclose(np.asarray(x_none), np.asarray(x_ones),
+                                   rtol=0, atol=3e-7)
 
     def test_single_walk_forwards_weights(self, key, gaussian_loglikelihood):
         ndim = 3
         x = jnp.full((ndim,), 0.5)
-        w_sq = jnp.sqrt(jnp.array([9.0, 1.0, 1.0]))
+        w_p = jnp.array([1.0, 1.0 / 9.0, 1.0 / 9.0])
         args = (key, x, -jnp.inf, gaussian_loglikelihood, jnp.eye(ndim),
                 0.1, 25, ndim, ndim, None, None)
         x_none, _, n_tot_none = _single_walk(*args)
-        x_w, _, n_tot_w = _single_walk(*args, direction_weights_sqrt=w_sq)
+        x_w, _, n_tot_w = _single_walk(*args, direction_weights_p=w_p)
         assert not np.allclose(np.asarray(x_none), np.asarray(x_w))
-        # The step budget is unchanged: weights redistribute the walk, they
-        # do not add or remove proposals.
+        # The step budget is unchanged: weights redistribute the walk,
+        # they do not add or remove proposals.
         assert int(n_tot_w) == int(n_tot_none)
 
     def test_sample_batch_mode_forwards_weights(self, key,
@@ -223,22 +276,37 @@ class TestRWalkDirectionWeights:
         x = jnp.full((4, ndim), 0.5)
         axes = jnp.broadcast_to(jnp.eye(ndim), (4, ndim, ndim))
         s = RWalkSampler(ndim=ndim, batch_size=4,
-                         rwalk_direction_weights=[9.0, 1.0])
-        expected_sqrt = np.sqrt(np.array([9.0, 1.0]) / 5.0)
-        assert s.rwalk_direction_weights_sqrt is not None
-        np.testing.assert_allclose(
-            np.asarray(s.rwalk_direction_weights_sqrt), expected_sqrt,
-            rtol=1e-6)
+                         rwalk_direction_weights=[1.0, 0.1])
+        assert s.rwalk_direction_weights_p is not None
+        np.testing.assert_allclose(np.asarray(s.rwalk_direction_weights_p),
+                                   [1.0, 0.1], rtol=1e-6)
         x_new, logL_new, n_acc, n_tot = s.sample(
             key, x, -jnp.inf, gaussian_loglikelihood, axes, 0.1, 20)
         assert x_new.shape == (ndim,)
 
+    def test_proposal_displacement_is_symmetric_zero_mean(self):
+        # The masked displacement stays centrally
+        # symmetric: per-coordinate mean ~ 0 and P(disp > 0) = P(disp < 0)
+        # (the ratio depends only on the norms, never on the signs).
+        ndim = 3
+        w_p = jnp.array([1.0, 0.5, 0.25])
+        x = jnp.full((ndim,), 0.5)
+        keys = random.split(random.PRNGKey(5), 8000)
+        props = jax.vmap(lambda k: _propose_one(
+            k, x, jnp.eye(ndim), 1.0, ndim, ndim, None, 0, w_p)[0])(keys)
+        disp = np.asarray(props) - 0.5
+        np.testing.assert_allclose(disp.mean(axis=0), 0.0, atol=0.02)
+        pos = (disp > 0).mean(axis=0)
+        neg = (disp < 0).mean(axis=0)
+        np.testing.assert_allclose(pos, neg, atol=0.03)
+
     def test_stationary_distribution_is_weight_independent(self):
-        # Correctness proof at the kernel level: the per-dim scaled ball is
-        # still centrally symmetric, so the stay-put Metropolis walk has the
-        # SAME invariant distribution (the likelihood-constraint region)
-        # whatever the weights.  Long walks under a fixed constraint must
-        # agree between weighted and unweighted kernels.
+        # Correctness proof at the kernel level: the masked +
+        # masked ball proposal is still centrally symmetric, so the
+        # stay-put Metropolis walk has the SAME invariant distribution
+        # (the likelihood-constraint region) whatever the weights.  Long
+        # walks under a fixed constraint must agree between weighted and
+        # unweighted kernels.
         ndim = 2
 
         def loglik(u):
@@ -247,14 +315,14 @@ class TestRWalkDirectionWeights:
         keys = random.split(random.PRNGKey(0), 2048)
         x0 = jnp.full((ndim,), 0.5)
 
-        def stationary(w_sq):
+        def stationary(w_p):
             xs, _, _ = jax.vmap(lambda k: _single_walk(
                 k, x0, jnp.array(-2.0), loglik, None, 1.0, 2000, ndim, ndim,
-                None, None, None, w_sq))(keys)
+                None, None, None, w_p))(keys)
             return np.asarray(xs)
 
         base = stationary(None)
-        weighted = stationary(jnp.sqrt(jnp.array([25.0, 1.0])))
+        weighted = stationary(jnp.array([1.0, 0.04]))
         # Invariant region: disk of radius 0.2 around 0.5 -> marginal
         # mean 0.5, var 0.01 for BOTH weight settings.
         for xs in (base, weighted):

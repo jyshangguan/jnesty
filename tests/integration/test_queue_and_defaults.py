@@ -7,7 +7,7 @@ from math import erf, sqrt, log, pi
 from jax import random
 
 from jnesty.dynesty.core import run_nested_sampling, WhileLoopNSConfig
-from jnesty import NestedSampler
+from jnesty import DynamicNestedSampler, NestedSampler
 
 
 def _logZ_analytical(ndim):
@@ -172,20 +172,20 @@ class TestDynestyDefaults:
 
 
 class TestRWalkDirectionWeightsAPI:
-    """Constructor-level behaviour of rwalk_direction_weights (task_005)."""
+    """Constructor-level behaviour of rwalk_direction_weights (task_006)."""
 
     def test_default_is_none(self):
         s = NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False)
         assert s.rwalk_direction_weights is None
 
-    def test_weights_normalized_to_mean_one(self):
+    def test_weights_passthrough_unchanged(self):
+        # Selection probabilities stored as given -- no normalization
+        # (the w=1 anchor IS the reference).
         s = NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False,
-                          rwalk_direction_weights=[8.0, 2.0, 1.0])
-        np.testing.assert_allclose(
-            float(jnp.mean(s.rwalk_direction_weights)), 1.0, rtol=1e-6)
+                          rwalk_direction_weights=[1.0, 0.25, 0.04])
         np.testing.assert_allclose(
             np.asarray(s.rwalk_direction_weights),
-            np.array([8.0, 2.0, 1.0]) / (11.0 / 3.0), rtol=1e-6)
+            [1.0, 0.25, 0.04], rtol=1e-6)
 
     @pytest.mark.parametrize("bad", [
         [1.0, 0.0, 1.0],
@@ -198,6 +198,16 @@ class TestRWalkDirectionWeightsAPI:
             NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False,
                           rwalk_direction_weights=bad)
 
+    def test_probability_above_one_raises(self):
+        with pytest.raises(ValueError, match="selection probabilities"):
+            NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False,
+                          rwalk_direction_weights=[1.0, 2.0, 1.0])
+
+    def test_missing_anchor_raises(self):
+        with pytest.raises(ValueError, match="no anchor"):
+            NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False,
+                          rwalk_direction_weights=[0.5, 0.5, 0.5])
+
     def test_hslice_rejects_weights(self):
         with pytest.raises(ValueError, match="sample='rwalk'"):
             NestedSampler(_loglik, _prior_transform, ndim=2, verbose=False,
@@ -209,10 +219,10 @@ class TestRWalkDirectionWeightsRuns:
     """End-to-end weighted rwalk runs (legacy single-walk + queue)."""
 
     def test_weighted_rwalk_legacy_logz(self):
-        """Strongly anisotropic weights on the legacy path keep logZ right."""
+        """Anchored 9:1 selection weights on the legacy path keep logZ right."""
         s = NestedSampler(_loglik, _prior_transform, ndim=2, nlive=100,
                           verbose=False, bound='single',
-                          rwalk_direction_weights=[9.0, 1.0])
+                          rwalk_direction_weights=[1.0, 1.0 / 9.0])
         s.run_nested(max_iterations=3000, delta_logZ_threshold=0.1,
                      print_progress=False)
         assert abs(s.results['logz'] - _logZ_analytical(2)) < 1.0
@@ -221,7 +231,24 @@ class TestRWalkDirectionWeightsRuns:
         """Same on the queue path (bound='multi' + queue refill)."""
         s = NestedSampler(_loglik, _prior_transform, ndim=2, nlive=100,
                           verbose=False, bound='multi', queue_size=4,
-                          rwalk_direction_weights=[9.0, 1.0])
+                          rwalk_direction_weights=[1.0, 0.1])
         s.run_nested(max_iterations=3000, delta_logZ_threshold=0.1,
                      print_progress=False)
         assert abs(s.results['logz'] - _logZ_analytical(2)) < 1.0
+
+
+@pytest.mark.slow
+class TestRWalkDirectionWeightsDynamic:
+    """DynamicNestedSampler forwards the weights via **static_kwargs."""
+
+    def test_dynamic_passthrough_weights(self):
+        """The weights reach every static sub-run (base + batch)."""
+        dns = DynamicNestedSampler(_loglik, _prior_transform, ndim=2,
+                                   nlive=50, verbose=False, bound='single',
+                                   rwalk_direction_weights=[1.0, 0.1])
+        assert dns.static_kwargs['rwalk_direction_weights'] == [1.0, 0.1]
+        dns.run_nested(nlive_init=50, dlogz_init=0.5, maxbatch=1,
+                       print_progress=False, seed=42)
+        # Dynamic 'logz' is the per-iteration trajectory; take the final.
+        logz = float(np.asarray(dns.results['logz'])[-1])
+        assert abs(logz - _logZ_analytical(2)) < 1.0

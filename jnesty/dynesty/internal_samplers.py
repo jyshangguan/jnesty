@@ -39,33 +39,49 @@ def apply_reflect(u):
     return jnp.where(idxs_even, jnp.mod(u, 1), 1 - jnp.mod(u, 1))
 
 
-def normalize_rwalk_direction_weights(weights, ndim):
+def validate_rwalk_direction_weights(weights, ndim, ncdim=None):
     """
-    Validate and normalize per-coordinate rwalk sampling weights.
+    Validate per-coordinate rwalk sampling-frequency weights.
+
+    Diffusion-rate semantics: coordinate ``i``'s displacement is scaled by
+    ``sqrt(w_i)``, so its exploration rate (position-variance growth per
+    step) is ``w_i`` relative to the ``w = 1`` anchors -- "``w = 0.2``
+    samples at 20% of the frequency" in the diffusion sense.  The weights
+    are relative frequencies, NOT free scale factors, and are used exactly
+    as given -- no normalization is applied.  The ``w = 1`` anchor entry is
+    the reference: the most-sampled coordinate, moved at full rate.
 
     Parameters
     ----------
     weights : sequence of float or array-like
-        Length-``ndim`` sampling weights, one per unit-cube coordinate.
-        Must be finite and strictly positive.
+        Length-``ndim`` selection probabilities, one per unit-cube
+        coordinate.  Each must be finite with ``0 < w <= 1``, and at least
+        one entry must equal ``1.0`` exactly (the anchor).
     ndim : int
         Number of dimensions the weights must match.
+    ncdim : int, optional
+        Number of clustered dimensions.  When given and
+        ``0 < ncdim < ndim``, at least one anchor (an entry exactly equal
+        to ``1.0``) must fall among ``weights[:ncdim]``: otherwise the
+        clustered mask could be all-zero and the clustered coordinates
+        would never move.
 
     Returns
     -------
     jax.Array, shape ``(ndim,)``
-        The weights normalized to mean 1, so the overall proposal-scale
-        semantics are unchanged (only the *relative* frequency of movement
-        along each coordinate is affected).
+        The weights, unchanged (they are probabilities, not scales).
 
     Raises
     ------
     ValueError
-        If the length does not match ``ndim``, or if any weight is not
-        finite or not strictly positive.  A zero weight would freeze its
-        coordinate (its posterior would be silently corrupted by the
-        starting-point distribution), so -- unlike ``DNestSampler``'s
-        ``sample_frequency`` -- zeros are rejected outright.
+        If the length does not match ``ndim``; if any weight is not finite
+        or not strictly positive (a zero weight would freeze its
+        coordinate: its posterior would be silently corrupted by the
+        starting-point distribution); if any weight exceeds 1 (weights are
+        selection probabilities in ``(0, 1]``); or if no weight equals
+        exactly 1 (no anchor: set the most-sampled coordinate's weight to
+        exactly 1).  With ``ncdim`` given, additionally when the clustered
+        block ``weights[:ncdim]`` contains no anchor.
     """
     w = jnp.asarray(weights)
     if w.shape != (ndim,):
@@ -79,9 +95,33 @@ def normalize_rwalk_direction_weights(weights, ndim):
             "rwalk_direction_weights must be strictly positive and finite "
             f"(got weights[{idx}] = {float(w[idx]):.6g}); a zero weight "
             "would freeze that coordinate and silently corrupt its "
-            "posterior.  To move a coordinate less, give it a small "
-            "positive weight instead.")
-    return w / jnp.mean(w)
+            "posterior.  To move a coordinate less often, give it a "
+            "small positive selection probability instead (and keep one "
+            "weight at exactly 1).")
+    over = w > 1
+    if bool(jnp.any(over)):
+        idx = int(jnp.argmax(over))
+        raise ValueError(
+            "rwalk_direction_weights are selection probabilities in "
+            f"(0, 1] -- coordinate i is selected with probability w_i "
+            f"(got weights[{idx}] = {float(w[idx]):.6g} > 1).  Express "
+            "relative sampling frequency as w_i = n_i / n_max and set the "
+            "most-sampled coordinate to exactly 1.")
+    if not bool(jnp.any(w == 1.0)):
+        raise ValueError(
+            "rwalk_direction_weights has no anchor: set the "
+            "most-sampled coordinate's weight to exactly 1 (the weights "
+            "are relative selection frequencies in (0, 1])")
+    if ncdim is not None and 0 < ncdim < ndim:
+        if not bool(jnp.any(w[:ncdim] == 1.0)):
+            raise ValueError(
+                "rwalk_direction_weights needs an anchor among the "
+                f"clustered dimensions: none of weights[:ncdim] equals 1 "
+                f"(ncdim={ncdim}), so the clustered selection mask could "
+                "be all-zero and the clustered coordinates would never "
+                "move.  Set one clustered coordinate's weight to exactly "
+                "1.")
+    return w
 
 
 class InternalSampler:
@@ -118,7 +158,7 @@ class InternalSampler:
 
 
 def _propose_one(key, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx,
-                 direction_weights_sqrt=None):
+                 direction_weights_p=None):
     """
     Generate a single proposal point from x.
 
@@ -129,13 +169,15 @@ def _propose_one(key, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx,
 
     Parameters
     ----------
-    direction_weights_sqrt : jax.Array, optional
-        Length-``ndim`` array of ``sqrt(w_i)`` with the per-coordinate
-        sampling weights (see :class:`RWalkSampler`).  When given, the
-        clustered-dims displacement is multiplied elementwise by its first
-        ``n_cluster`` entries; non-clustered dimensions keep their uniform
-        resampling behaviour regardless of weights.  ``None`` (default)
-        leaves the proposal untouched.
+    direction_weights_p : jax.Array, optional
+        Length-``ndim`` array of per-coordinate sampling-frequency
+        weights (see :class:`RWalkSampler`).  When given, each clustered
+        coordinate ``i``'s displacement is scaled by ``sqrt(w_i)``, so its
+        exploration rate is ``w_i`` relative to the ``w=1`` anchors.
+        Non-clustered dimensions keep their uniform resampling behaviour
+        regardless of weights.  ``None`` (default) leaves the proposal
+        untouched: the Python-level branch is not traced, so the compiled
+        kernel is unchanged.
 
     Returns (u_prop, in_bounds) where in_bounds is True if proposal is within [0,1].
     """
@@ -158,15 +200,31 @@ def _propose_one(key, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx,
             else:
                 cluster_axes = None
         du = cluster_axes @ dr if cluster_axes is not None else dr
-        if direction_weights_sqrt is not None:
-            # Opt-in per-coordinate sampling weights: scale the clustered
-            # displacement elementwise by sqrt(w_i) (w normalized to mean 1,
-            # so the overall step-scale semantics are unchanged).  This
-            # keeps the proposal symmetric and zero-mean in every
-            # coordinate, which is what constraint-rejection rwalk needs.
-            w_sq = jnp.asarray(direction_weights_sqrt[:n_cluster],
-                               dtype=du.dtype)
-            du = du * w_sq
+        if direction_weights_p is not None:
+            # Opt-in per-coordinate sampling-frequency weights, implemented
+            # as DIFFUSION-RATE scaling: each clustered coordinate i's
+            # displacement is scaled by sqrt(w_i), so its exploration rate
+            # (position-variance growth per step) is w_i relative to the
+            # w=1 anchors -- "w=0.2 samples at 20% of the frequency" in the
+            # diffusion sense.  Small, frequent moves keep narrow
+            # coordinates (e.g. near-linear amplitude latents) mixing
+            # INSIDE the likelihood constraint.
+            #
+            # Deliberately NOT literal Bernoulli selection (perturb
+            # coordinate i with probability w_i at the natural step
+            # magnitude): rwalk has a single global step scale, so a
+            # natural-magnitude move on a coordinate narrower than that
+            # scale is a many-sigma jump that is always rejected -- the
+            # coordinate stops mixing and the evidence is biased (measured
+            # 2026-11-24, 8-D two-scale demo at 25:1: logZ err -7..-15
+            # with natural magnitude, -3..-10 with norm-restoring
+            # renormalization).  dnest survives literal frequency because
+            # its MCMC has per-coordinate adaptive proposal widths; rwalk
+            # does not.  sqrt(w) gives the same variance-rate w with
+            # acceptance-preserving move sizes.
+            w_p = jnp.asarray(direction_weights_p[:n_cluster],
+                              dtype=du.dtype)
+            du = du * jnp.sqrt(w_p)
         u_prop = u_prop.at[:n_cluster].set(x[:n_cluster] + scale * du)
 
     # Unit cube check — reject proposals outside [0,1] (Dynesty default)
@@ -176,7 +234,7 @@ def _propose_one(key, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx,
 
 def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
                  axes, scale, n_steps, ndim, n_cluster, prior_bounds,
-                 walk_schedule, context=None, direction_weights_sqrt=None):
+                 walk_schedule, context=None, direction_weights_p=None):
     """Run a single K-step random walk. Returns (x_final, n_accepted, n_total).
 
     Matches Dynesty's generic_random_walk (internal_samplers.py:866-987):
@@ -185,8 +243,8 @@ def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
     - n_accepted counts only successful moves (logL > constraint AND in bounds)
     - n_total counts ALL proposals (boundary + likelihood evaluations)
 
-    ``direction_weights_sqrt`` (optional, see :func:`_propose_one`) scales the
-    clustered-dims displacement per coordinate.
+    ``direction_weights_p`` (optional, see :func:`_propose_one`) applies
+    the per-coordinate sampling-frequency weights to the clustered dims.
     """
 
     def walk_step(walk_state, step_idx):
@@ -195,7 +253,7 @@ def _single_walk(key, x_start, logL_constraint, loglikelihood_fn,
 
         x_proposed, in_unit_cube = _propose_one(
             subkey, x, axes, scale, n_cluster, ndim, walk_schedule, step_idx,
-            direction_weights_sqrt
+            direction_weights_p
         )
 
         # Check prior_bounds if provided
@@ -232,7 +290,7 @@ def vmap_queue_refill(refill_key, live_x, live_logL, loglstar,
                       loglikelihood_fn, me_axes, me_logvol_ells,
                       bound_axes, scale, rwalk_K, ndim, ncdim,
                       queue_size, use_multi_ellipsoid, prior_bounds=None,
-                      context=None, direction_weights_sqrt=None):
+                      context=None, direction_weights_p=None):
     """Generate queue_size candidate points in parallel via vmap.
 
     Each candidate is produced by a FULL rwalk_K-step random walk from a
@@ -240,9 +298,9 @@ def vmap_queue_refill(refill_key, live_x, live_logL, loglstar,
     (or bound_axes if not multi-ellipsoid).  Matches Dynesty's pool.map batch:
     every worker does a full walk independently.
 
-    ``direction_weights_sqrt`` (optional, see :func:`_propose_one`) scales the
-    clustered-dims displacement per coordinate, exactly as in the legacy
-    single-walk path.
+    ``direction_weights_p`` (optional, see :func:`_propose_one`) applies
+    the per-coordinate sampling-frequency weights, exactly as in the
+    legacy single-walk path.
 
     Returns
     -------
@@ -284,7 +342,7 @@ def vmap_queue_refill(refill_key, live_x, live_logL, loglstar,
         x_new, n_acc, n_tot = _single_walk(
             k_walk, x_start, loglstar, loglikelihood_fn,
             axes, scale, rwalk_K, ndim, ncdim,
-            prior_bounds, None, context, direction_weights_sqrt
+            prior_bounds, None, context, direction_weights_p
         )
         logL_new = call_with_context(loglikelihood_fn, x_new, context)
         return x_new, logL_new, n_acc, n_tot
@@ -306,33 +364,40 @@ class RWalkSampler(InternalSampler):
     (vmap across GPU), each with n_steps // batch_size steps.
     Each batch walk can start from a different point and use different axes.
 
-    Optional per-coordinate sampling weights
-    (``rwalk_direction_weights``): the clustered-dims displacement
-    ``scale * (cluster_axes @ dr)`` is multiplied elementwise by
-    ``sqrt(w_i)``, where ``w`` is normalized to mean 1.  Coordinates with
-    large weights are explored more vigorously per proposal (e.g. physical
-    parameters among many near-linear amplitude latents), coordinates with
-    small weights less so, while the overall step-scale semantics and the
-    symmetric zero-mean proposal class are unchanged -- the target
-    distribution is NOT affected, only the mixing efficiency.  This is the
-    rwalk analogue of :class:`jnesty.dnest_sampler.DNestSampler`'s
-    ``sample_frequency``, except that zero weights are rejected: freezing a
-    coordinate would silently corrupt its posterior.  Non-clustered
-    dimensions keep their uniform resampling behaviour regardless of
-    weights.
+    Optional per-coordinate sampling-frequency weights
+    (``rwalk_direction_weights``): each clustered coordinate ``i``'s
+    displacement is scaled by ``sqrt(w_i)``, giving an exploration rate of
+    ``w_i`` relative to the ``w=1`` anchors (diffusion-rate semantics; see
+    the kernel comment in :func:`_propose_one` for why literal Bernoulli
+    selection -- dnest's mechanism -- fails in rwalk, which has a single
+    global step scale).  The adaptive scale tuner sees the
+    same step-size semantics; the proposal stays centrally symmetric and
+    zero-mean in every coordinate, so the target distribution is NOT
+    affected, only the mixing efficiency).  Coordinates with ``w = 1``
+    (the anchor, required: at least one entry exactly 1, and when
+    ``0 < ncdim < ndim`` at least one anchor among the clustered dims)
+    are moved at every step; coordinates with small ``w`` are moved
+    proportionally less often (the rwalk analogue of
+    :class:`jnesty.dnest_sampler.DNestSampler`'s ``sample_frequency``).
+    Weights are used exactly as given (no normalization: the ``w = 1``
+    anchor IS the reference), must be finite with ``0 < w <= 1`` -- a
+    zero weight is rejected because freezing a coordinate would silently
+    corrupt its posterior.  Non-clustered dimensions keep their uniform
+    resampling behaviour regardless of weights.  All-ones weights give
+    proposals bit-identical to the unweighted ones.
 
-    Finite-budget caveat (empirical, task_005): the kernel's invariant
-    distribution is weight-independent (the scaled-ball proposal stays
-    centrally symmetric), but the per-walk displacement along coordinate
-    ``i`` scales as ``sqrt(w_i)``.  With the finite ``rwalk_K`` step
-    budget, heavily down-weighted coordinates mix more slowly; on an
-    equal-width 20-D Gaussian, weight ratios of 25:1 measurably degrade
-    posterior moments and ratios >= 100:1 bias the evidence.  Keep ratios
-    moderate (roughly <= 25:1) unless the down-weighted coordinates are
-    correspondingly narrower (the intended use: amplitudes are narrow /
-    conditionally near-linear, physical parameters are wide), and
-    sanity-check convergence as usual.  See
-    ``develop/task_005_rwalk_weights/validation.json``.
+    Finite-budget caveat (empirical, task_006): the kernel's invariant
+    distribution is weight-independent, but at the finite ``rwalk_K``
+    step budget a coordinate selected with probability ``w_i`` only takes
+    ~``w_i * rwalk_K`` steps per walk, so heavily down-weighted
+    coordinates mix more slowly.  On an equal-width 20-D Gaussian,
+    selection ratios of ~25:1 measurably degrade posterior moments and
+    ratios >= 100:1 bias the evidence.  Keep ratios moderate (roughly
+    <= 25:1) unless the down-weighted coordinates are correspondingly
+    narrower (the intended use: amplitudes are narrow / conditionally
+    near-linear, physical parameters are wide), and sanity-check
+    convergence as usual.  See
+    ``develop/task_006_rwalk_frequency/validation.json``.
 
     Parameters
     ----------
@@ -345,10 +410,11 @@ class RWalkSampler(InternalSampler):
     ncdim : int, optional
         Number of clustered dimensions. Default: ``ndim``
     rwalk_direction_weights : sequence of float, optional
-        Length-``ndim``, strictly positive, finite sampling weights
-        (mean-1 normalized internally).  ``None`` (default) keeps the
-        isotropic proposal and reproduces the previous behaviour
-        bit-for-bit.
+        Length-``ndim`` selection probabilities, each finite in
+        ``(0, 1]`` with at least one entry exactly ``1.0`` (and an anchor
+        among the clustered dims when ``0 < ncdim < ndim``).  ``None``
+        (default) keeps the isotropic proposal and reproduces the
+        previous behaviour bit-for-bit.
     """
 
     def __init__(self, ndim, target_acceptance=0.5, batch_size=1,
@@ -358,16 +424,23 @@ class RWalkSampler(InternalSampler):
         self.batch_size = batch_size
         self.ncdim = ncdim if ncdim is not None else ndim
         if rwalk_direction_weights is None:
-            #: Mean-1 normalized weights, or None when the feature is off.
+            #: Validated selection probabilities, or None when off.
             self.rwalk_direction_weights = None
-            #: sqrt of the normalized weights, or None when off; sliced to
-            #: the clustered dims inside the kernels.
-            self.rwalk_direction_weights_sqrt = None
+            #: Per-coordinate selection probabilities consumed by the
+            #: kernels (the validated weights themselves -- no transform),
+            #: or None when the feature is off.
+            self.rwalk_direction_weights_p = None
         else:
-            self.rwalk_direction_weights = normalize_rwalk_direction_weights(
-                rwalk_direction_weights, ndim)
-            self.rwalk_direction_weights_sqrt = jnp.sqrt(
-                self.rwalk_direction_weights)
+            self.rwalk_direction_weights = validate_rwalk_direction_weights(
+                rwalk_direction_weights, ndim, ncdim=self.ncdim)
+            # All-ones weights select every coordinate in every step; the
+            # extra mask multiply can still shift XLA kernel fusion by one
+            # ulp inside lax.scan, so collapse them to the exact off path.
+            if all(w == 1.0 for w in self.rwalk_direction_weights):
+                self.rwalk_direction_weights = None
+                self.rwalk_direction_weights_p = None
+            else:
+                self.rwalk_direction_weights_p = self.rwalk_direction_weights
 
         # GPU sharding: disabled by default — vmap already parallelizes across devices.
         # Explicit sharding with Mesh/NamedSharding adds overhead for small batch sizes
@@ -403,7 +476,7 @@ class RWalkSampler(InternalSampler):
                 key, x_starts, logL_constraint, loglikelihood_fn,
                 axes, scale, n_steps, ndim, n_cluster,
                 prior_bounds, walk_schedule, context,
-                self.rwalk_direction_weights_sqrt
+                self.rwalk_direction_weights_p
             )
         else:
             # Parallel walks: B walks with n_steps // B steps each
@@ -416,7 +489,7 @@ class RWalkSampler(InternalSampler):
                     wk, x0, logL_constraint, loglikelihood_fn,
                     ax, scale, steps_per_walk, ndim, n_cluster,
                     prior_bounds, walk_schedule, context,
-                    self.rwalk_direction_weights_sqrt
+                    self.rwalk_direction_weights_p
                 )
             )
             x_candidates, n_accepted_arr, n_total_arr = vmapped_walk(
