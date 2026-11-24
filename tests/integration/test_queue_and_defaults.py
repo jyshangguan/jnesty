@@ -169,3 +169,59 @@ class TestDynestyDefaults:
                      print_progress=False)
         true_logZ = _logZ_analytical(2)
         assert abs(s.results['logz'] - true_logZ) < 1.0
+
+
+class TestRWalkDirectionWeightsAPI:
+    """Constructor-level behaviour of rwalk_direction_weights (task_005)."""
+
+    def test_default_is_none(self):
+        s = NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False)
+        assert s.rwalk_direction_weights is None
+
+    def test_weights_normalized_to_mean_one(self):
+        s = NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False,
+                          rwalk_direction_weights=[8.0, 2.0, 1.0])
+        np.testing.assert_allclose(
+            float(jnp.mean(s.rwalk_direction_weights)), 1.0, rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(s.rwalk_direction_weights),
+            np.array([8.0, 2.0, 1.0]) / (11.0 / 3.0), rtol=1e-6)
+
+    @pytest.mark.parametrize("bad", [
+        [1.0, 0.0, 1.0],
+        [1.0, -2.0, 1.0],
+        [1.0, 1.0],
+        [1.0, float("nan"), 1.0],
+    ])
+    def test_invalid_weights_raise(self, bad):
+        with pytest.raises(ValueError, match="rwalk_direction_weights"):
+            NestedSampler(_loglik, _prior_transform, ndim=3, verbose=False,
+                          rwalk_direction_weights=bad)
+
+    def test_hslice_rejects_weights(self):
+        with pytest.raises(ValueError, match="sample='rwalk'"):
+            NestedSampler(_loglik, _prior_transform, ndim=2, verbose=False,
+                          sample='hslice', rwalk_direction_weights=[1.0, 1.0])
+
+
+@pytest.mark.slow
+class TestRWalkDirectionWeightsRuns:
+    """End-to-end weighted rwalk runs (legacy single-walk + queue)."""
+
+    def test_weighted_rwalk_legacy_logz(self):
+        """Strongly anisotropic weights on the legacy path keep logZ right."""
+        s = NestedSampler(_loglik, _prior_transform, ndim=2, nlive=100,
+                          verbose=False, bound='single',
+                          rwalk_direction_weights=[9.0, 1.0])
+        s.run_nested(max_iterations=3000, delta_logZ_threshold=0.1,
+                     print_progress=False)
+        assert abs(s.results['logz'] - _logZ_analytical(2)) < 1.0
+
+    def test_weighted_rwalk_queue_logz(self):
+        """Same on the queue path (bound='multi' + queue refill)."""
+        s = NestedSampler(_loglik, _prior_transform, ndim=2, nlive=100,
+                          verbose=False, bound='multi', queue_size=4,
+                          rwalk_direction_weights=[9.0, 1.0])
+        s.run_nested(max_iterations=3000, delta_logZ_threshold=0.1,
+                     print_progress=False)
+        assert abs(s.results['logz'] - _logZ_analytical(2)) < 1.0

@@ -101,3 +101,44 @@ class TestVmapQueueRefill:
         )
 
         np.testing.assert_array_equal(np.array(qnt), rwalk_K)
+
+
+class TestQueueRefillDirectionWeights:
+    """Per-coordinate rwalk weights reach the queue-refill walk kernel."""
+
+    def _refill(self, w_sq, ndim=3, queue_size=16):
+        nlive = 50
+        key = random.PRNGKey(0)
+        live_x = random.uniform(key, (nlive, ndim))
+        live_logL = jnp.array([-0.5 * jnp.sum((x - 0.5) ** 2) for x in live_x])
+        return vmap_queue_refill(
+            random.PRNGKey(1), live_x, live_logL, -jnp.inf,
+            _loglik_gaussian,
+            jnp.zeros((1, ndim, ndim)), jnp.array([-jnp.inf]),
+            jnp.eye(ndim), 1.0, 20, ndim, ndim, queue_size, False, None,
+            direction_weights_sqrt=w_sq)
+
+    def test_output_shapes_with_weights(self):
+        qx, ql, qna, qnt = self._refill(jnp.sqrt(jnp.array([4.0, 1.0, 1.0])))
+        assert qx.shape == (16, 3)
+        assert ql.shape == (16,)
+        assert jnp.all(jnp.isfinite(ql))
+        assert jnp.all(qnt > 0)
+
+    def test_weights_change_the_candidates(self):
+        """Forwarding proof: same key, weights on -> different candidates."""
+        qx_ref, *_ = self._refill(None)
+        qx_w, *_ = self._refill(jnp.sqrt(jnp.array([4.0, 1.0, 1.0])))
+        assert not np.allclose(np.asarray(qx_ref), np.asarray(qx_w))
+
+    def test_uniform_weights_bit_identical_to_default(self):
+        qx_ref, ql_ref, qna_ref, qnt_ref = self._refill(None)
+        qx_w, ql_w, qna_w, qnt_w = self._refill(jnp.ones(3))
+        np.testing.assert_array_equal(np.asarray(qx_ref), np.asarray(qx_w))
+        np.testing.assert_array_equal(np.asarray(ql_ref), np.asarray(ql_w))
+        np.testing.assert_array_equal(np.asarray(qnt_ref), np.asarray(qnt_w))
+
+    def test_step_budget_unchanged_with_weights(self):
+        _, _, _, qnt_ref = self._refill(None)
+        _, _, _, qnt_w = self._refill(jnp.sqrt(jnp.array([9.0, 1.0, 1.0])))
+        np.testing.assert_array_equal(np.asarray(qnt_ref), np.asarray(qnt_w))

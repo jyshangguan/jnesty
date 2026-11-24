@@ -10,6 +10,14 @@ class TestWhileLoopNSConfig:
         assert c.delta_logZ_threshold == 0.01
         assert c.memory_frac == 0.9
 
+    def test_rwalk_direction_weights_default(self):
+        # Optional-None default keeps the config repr (part of the
+        # compile-cache key) stable for existing configs.
+        c = WhileLoopNSConfig()
+        assert c.rwalk_direction_weights is None
+        assert WhileLoopNSConfig._fields[-1] == 'rwalk_direction_weights'
+        assert repr(c).endswith("rwalk_direction_weights=None)")
+
 
 class TestWhileLoopNSResult:
     def test_field_names(self):

@@ -121,6 +121,13 @@ class WhileLoopNSConfig(NamedTuple):
     hslice_kwargs: Optional[dict] = None
     #: Optional unit-cube-space gradient override for ``sample='hslice'``.
     grad_loglikelihood: Optional[Callable] = None
+    #: Optional per-coordinate rwalk sampling weights (length ``ndim``,
+    #: strictly positive; validated and mean-1 normalized by
+    #: :class:`~jnesty.dynesty.internal_samplers.RWalkSampler`).  The walk
+    #: displacement along clustered dimension ``i`` is multiplied by
+    #: ``sqrt(w_i)``.  ``None`` (default) keeps the isotropic proposal, the
+    #: config repr, and hence the compile-cache key unchanged.
+    rwalk_direction_weights: Optional[jnp.ndarray] = None
 
 
 class WhileLoopNSResult(NamedTuple):
@@ -581,12 +588,23 @@ def run_nested_sampling(
             # optional unit-cube-space gradient override.
             sampler_kwargs.update(config.hslice_kwargs or {})
             sampler_kwargs['grad_loglikelihood'] = config.grad_loglikelihood
+        elif config.sample == 'rwalk':
+            # Opt-in per-coordinate sampling weights for the random walk
+            # (None keeps the isotropic proposal bit-for-bit).
+            sampler_kwargs['rwalk_direction_weights'] = (
+                config.rwalk_direction_weights)
         sampler_obj = get_sampler(config.sample, ndim, **sampler_kwargs)
 
         # The sampler may round batch_size down for GPU sharding (multiple of n_devices).
         # Use the actual batch_size from the sampler for all downstream code.
         effective_batch_size = sampler_obj.batch_size
         config = config._replace(batch_size=effective_batch_size)
+
+        # sqrt of the mean-1 normalized rwalk weights (None when the feature
+        # is off).  The queue-refill kernel runs the walk directly, bypassing
+        # sampler_obj.sample, so both call sites below need it explicitly.
+        _rwalk_w_sqrt = getattr(
+            sampler_obj, 'rwalk_direction_weights_sqrt', None)
 
         # === PHASE 2: Rwalk with adaptive bounding ===
         use_multi_ellipsoid = config.bound == 'multi'
@@ -623,7 +641,8 @@ def run_nested_sampling(
                 _refill_key, live_x, live_logL, _loglstar_init, loglikelihood_for_jit,
                 me_axes, me_logvol_ells, bound_axes, current_scale,
                 rwalk_K, ndim, _ncdim_init, config.queue_size, use_multi_ellipsoid,
-                config.prior_bounds if has_prior_bounds else None, context)
+                config.prior_bounds if has_prior_bounds else None, context,
+                direction_weights_sqrt=_rwalk_w_sqrt)
 
         # State for Phase 2 (continues from Phase 1)
         _base_state = (
@@ -894,7 +913,8 @@ def run_nested_sampling(
                         rkey, lx, ll, loglstar_r, loglikelihood_for_jit,
                         me_axes_state, me_logvol_ells, state[13], new_sc,
                         rwalk_K, ndim, _ncdim_q, _queue_size, use_multi_ellipsoid,
-                        config.prior_bounds if has_prior_bounds else None, context)
+                        config.prior_bounds if has_prior_bounds else None, context,
+                        direction_weights_sqrt=_rwalk_w_sqrt)
                     return new_sc, qx, ql, qna, qnt, ky
 
                 def _skip_drain(drain_args):

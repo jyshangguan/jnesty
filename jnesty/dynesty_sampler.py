@@ -193,6 +193,32 @@ class NestedSampler:
         * ``max_reflects``: reflections per direction (default 15);
         * ``max_chords``: chord buffer size (default 64);
         * ``max_contract``: chord proposals per slice (default 60).
+    rwalk_direction_weights : sequence of float, optional
+        Only used by ``sample='rwalk'``.  Opt-in per-coordinate sampling
+        weights, one per dimension (length ``ndim``), for spending more of
+        the proposal budget on some coordinates than others -- e.g. a few
+        physical parameters among many near-linear amplitude latents (the
+        rwalk analogue of
+        :class:`~jnesty.dnest_sampler.DNestSampler`'s
+        ``sample_frequency``).  The clustered-dims walk displacement along
+        coordinate ``i`` is multiplied by ``sqrt(w_i)`` after mean-1
+        normalization, so the overall step-scale semantics and the target
+        distribution are unchanged; weights alter efficiency, not the
+        posterior.  Weights must be finite and strictly positive: unlike
+        DNest's ``sample_frequency``, a zero weight is rejected with
+        ``ValueError`` because freezing a coordinate would silently corrupt
+        its posterior.  ``None`` (default) keeps the isotropic proposal and
+        reproduces the previous behaviour bit-for-bit.  Non-clustered
+        dimensions (``ncdim < ndim``) keep their uniform resampling
+        behaviour regardless of weights.
+
+        Finite-budget caveat: per-walk displacement scales as
+        ``sqrt(w_i)``, so heavily down-weighted coordinates mix more slowly
+        within the fixed ``rwalk_K`` budget (the kernel itself remains
+        unbiased).  Keep weight ratios moderate (roughly <= 25:1) unless
+        the down-weighted coordinates are correspondingly narrower, and
+        check convergence (``logzerr``, posterior-moment stability) as
+        usual.
 
     Notes
     -----
@@ -226,6 +252,7 @@ class NestedSampler:
         sample: str = 'rwalk',
         grad_loglikelihood: Optional[Callable] = None,
         hslice_kwargs: Optional[Dict[str, Any]] = None,
+        rwalk_direction_weights=None,
     ):
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
@@ -241,6 +268,19 @@ class NestedSampler:
         self.sample = sample
         self.grad_loglikelihood = grad_loglikelihood
         self.hslice_kwargs = dict(hslice_kwargs) if hslice_kwargs else None
+        #: Opt-in per-coordinate rwalk sampling weights (mean-1 normalized),
+        #: or None when the feature is off.  Validated here so a bad vector
+        #: fails at construction, and again by the RWalkSampler at run time.
+        if rwalk_direction_weights is not None:
+            if sample != 'rwalk':
+                raise ValueError(
+                    "rwalk_direction_weights is only supported by "
+                    f"sample='rwalk' (got sample={sample!r})")
+            from .dynesty.internal_samplers import (
+                normalize_rwalk_direction_weights)
+            rwalk_direction_weights = normalize_rwalk_direction_weights(
+                rwalk_direction_weights, ndim)
+        self.rwalk_direction_weights = rwalk_direction_weights
         # Remember the *requested* values: the hslice notes below must only
         # fire when an explicit user request is overridden.
         _requested_queue_size = queue_size
@@ -447,6 +487,7 @@ class NestedSampler:
             sample=self.sample,
             hslice_kwargs=self.hslice_kwargs,
             grad_loglikelihood=self.grad_loglikelihood,
+            rwalk_direction_weights=self.rwalk_direction_weights,
         )
 
         key = random.PRNGKey(seed)
