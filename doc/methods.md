@@ -62,6 +62,47 @@ The random walk sampler (`rwalk`) follows dynesty's
    a valid replacement ($\log\mathcal{L} > \log\mathcal{L}^*$) is found,
    matching dynesty's `_new_point()` while-True behavior.
 
+### Sampling frequency
+
+Both static-NS engines accept per-coordinate *sampling-frequency* weights so
+that parameters with very different roles can be explored at different rates
+— e.g. a few physical parameters among many near-linear amplitude latents:
+
+- **`NestedSampler(..., rwalk_direction_weights=[w])`** (diffusion-rate
+  semantics): each clustered coordinate *i*'s walk displacement is scaled by
+  $\sqrt{w_i}$, so its exploration rate (position-variance growth per step)
+  is $w_i$ relative to the $w=1$ anchors — "w = 0.2 samples at 20% of the
+  frequency". Weights must be finite with $0 < w \le 1$ and at least one
+  entry exactly $1$ (the anchor); they are used as given, with no
+  normalization. Zeros are rejected: freezing a coordinate silently corrupts
+  its posterior. `None` (default) and all-ones weights are bit-identical to
+  the unweighted sampler. Measured on an 8-D two-scale problem, aligned
+  weights (physical parameters at the anchor, tight latents at 1/25) cut
+  posterior-moment bias ~3–4x at equal likelihood-call count; weight ratios
+  beyond ~25:1 starve mixing at finite walk length (ratio 4 is safe, 25 is
+  borderline, 100 fails).
+- **`DNestSampler(..., sample_frequency=f)`** (proposal-frequency
+  semantics): per-coordinate proposal allocation weights, normalised
+  internally. Zeros *freeze* the coordinate (with a warning) — the opposite
+  of rwalk's choice, matching CDNest.
+
+Literal Bernoulli selection (perturb coordinate *i* with probability $w_i$
+at the natural step magnitude — dnest's mechanism) was implemented and
+measured and is **refuted for rwalk**: the random walk has a single global
+step scale, so a natural-magnitude move on a coordinate narrower than that
+scale is a many-sigma jump that the likelihood constraint always rejects —
+the coordinate stops mixing and the evidence is biased (measured: logZ
+errors of −7..−15 at a 25:1 ratio on the two-scale benchmark). dnest
+survives literal frequency because its MCMC has per-coordinate adaptive
+proposal widths. $\sqrt{w}$ scaling delivers the same variance rate $w$
+with acceptance-preserving move sizes.
+
+See also the convergence stop for diffusive nested sampling:
+`DNestSampler.run(..., delta_logZ=0.05)` stops early (opt-in) once level
+creation has finished and the estimated remaining evidence is below the
+threshold — measured to stop ~9x earlier with |ΔlogZ| ≤ 0.03 versus the
+full save budget.
+
 ## Bounding Methods
 
 JNesty implements three bounding methods, selected by the `bound` parameter:

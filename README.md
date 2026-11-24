@@ -26,6 +26,10 @@ inferences).
   matching dynesty's `bound='multi'` implementation.
 - **Queue mode** — dynesty-style GPU parallelism where each candidate gets a
   full random walk and scale adapts at queue drain.
+- **Sampling-frequency weights** — `rwalk_direction_weights=[w]` explores
+  coordinates at different diffusion rates (max=1 anchored; the rwalk analogue
+  of dnest's `sample_frequency`), and `DNestSampler.run(..., delta_logZ=...)`
+  adds an opt-in convergence stop to diffusive nested sampling.
 - **JAX Nautilus engine** — our GPU port of the Nautilus importance nested
   sampler: neural-network bounds, every likelihood call kept, and large
   weighted posterior samples (optional `jnesty[nautilus]` extra).
