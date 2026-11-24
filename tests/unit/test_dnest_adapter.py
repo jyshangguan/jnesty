@@ -22,7 +22,8 @@ class FakeJaxDNestSampler:
                  thread_steps_factor=10.0, new_level_interval_factor=2.0,
                  save_interval_factor=None, max_num_levels=0, lam=10.0,
                  beta=100.0, compression=2.718281828459045, ptol=0.1,
-                 seed=None, device=None, context=None):
+                 seed=None, device=None, context=None,
+                 gradient_scales=False, gradient_interval=100):
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
         self.ndim = ndim
@@ -40,6 +41,8 @@ class FakeJaxDNestSampler:
         self.seed = seed
         self.device = device
         self.context = context
+        self.gradient_scales = gradient_scales
+        self.gradient_interval = gradient_interval
         self.sample_frequency_input = sample_frequency
         self.run_calls = []
         self.posterior_calls = 0
@@ -138,6 +141,19 @@ def test_constructor_defaults(fake_engine):
     assert native.beta == 100.0
     assert native.save_interval_factor is None
     assert native.ptol == 0.1
+    # gradient-informed proposal scales: off by default (bit-identity)
+    assert native.gradient_scales is False
+    assert native.gradient_interval == 100
+
+
+def test_constructor_gradient_scales_forwarded(fake_engine):
+    loglikelihood, prior_transform = _problem()
+    sampler = jnesty.DNestSampler(
+        loglikelihood, prior_transform, ndim=2, gradient_scales=True,
+        gradient_interval=25)
+    native = sampler.native_sampler
+    assert native.gradient_scales is True
+    assert native.gradient_interval == 25
 
 
 def test_run_delegation(fake_engine):

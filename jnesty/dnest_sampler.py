@@ -38,9 +38,20 @@ plotting-compatible :class:`~jnesty.results.Results` view at ``T``, and
 ``(points, log_w, log_l)`` triple.  ``T = 1`` reproduces the standard
 posterior exactly; the default ``to_results()``/``posterior()`` paths
 are unchanged.
+
+An opt-in gradient-informed proposal (``gradient_scales=True``) is also
+available: per-coordinate proposal scales modulated by the running
+average of ``|d logL / du|`` (sensitive coordinates take smaller steps),
+computed from a separate fold-in key stream every ``gradient_interval``
+steps.  The proposal stays in the symmetric one-coordinate class, so the
+evidence and detailed balance are untouched, and the default
+``gradient_scales=False`` path is bit-identical to a run without the
+argument.
 """
 
 import math
+
+import numpy as np
 
 __all__ = ['DNestSampler']
 
@@ -120,6 +131,31 @@ class DNestSampler:
     context : pytree or None, optional
         Passed as a second argument to every likelihood and prior call,
         keeping large datasets out of the compiled kernels.
+    gradient_scales : bool, optional
+        Opt-in gradient-informed per-coordinate proposal scales (the
+        dfnest analogue of dynesty's gradient-aware ``hsampler`` tuning,
+        without changing the proposal class).  When ``True``, every
+        ``gradient_interval`` MCMC steps the engine computes the gradient
+        of the log-likelihood with respect to the unit-cube coordinates
+        at one uniformly chosen live particle and maintains a
+        per-coordinate running average of ``|d logL / du_i|``.  The
+        proposal scale of coordinate ``i`` is then modulated by
+        ``gm(avg) / avg_i`` with the geometric mean normalised to one
+        (the overall step budget is unchanged): sensitive coordinates —
+        large average gradient — take *smaller* steps, insensitive ones
+        *larger* steps, equalising per-coordinate acceptance.  The
+        proposal remains a symmetric wrapped one-coordinate perturbation,
+        so detailed balance and the evidence are untouched; the gradient
+        is diagnostic only, drawn from a separate fold-in key stream so
+        it never perturbs the proposal randomness.  Default ``False``:
+        the branch is never traced and results are bit-identical to a
+        run without the argument.
+    gradient_interval : int, optional
+        MCMC steps between gradient computations (default 100).  Each
+        event costs one forward+backward likelihood pass at a single
+        particle — an amortised ~``1 / gradient_interval`` backward pass
+        per MCMC step.  Events are settled at block boundaries (at most
+        32 per block).
 
     Notes
     -----
@@ -127,6 +163,13 @@ class DNestSampler:
     double precision); this is a process-global JAX setting, so a session
     that also uses the Dynesty-style samplers should treat float64 as
     enabled from the first ``DNestSampler`` construction onwards.
+
+    ``gradient_scales`` composes orthogonally with ``sample_frequency``:
+    the frequency weights allocate *how often* each coordinate is
+    proposed, the gradient scales *how far* its step reaches.  Current
+    multipliers and the underlying gradient-magnitude averages are
+    available as ``gradient_scale_multipliers`` /
+    ``gradient_magnitudes`` / ``n_gradient_events`` on the sampler.
 
     Examples
     --------
@@ -141,7 +184,8 @@ class DNestSampler:
                  thread_steps_factor=10.0, new_level_interval_factor=2.0,
                  save_interval_factor=None, max_num_levels=0, lam=10.0,
                  beta=100.0, compression=math.e, ptol=0.1, seed=None,
-                 device=None, context=None):
+                 device=None, context=None, gradient_scales=False,
+                 gradient_interval=100):
         engine = _load_engine()
         self._native = engine.JaxDNestSampler(
             loglikelihood, prior_transform, ndim,
@@ -152,7 +196,8 @@ class DNestSampler:
             save_interval_factor=save_interval_factor,
             max_num_levels=max_num_levels, lam=lam, beta=beta,
             compression=compression, ptol=ptol, seed=seed, device=device,
-            context=context)
+            context=context, gradient_scales=gradient_scales,
+            gradient_interval=gradient_interval)
 
     # ------------------------------------------------------------------
     # native API
@@ -239,6 +284,12 @@ class DNestSampler:
             print('Coordinate proposals/accepts: '
                   + ', '.join(f'{a}/{c} ({r:.0%})' for a, c, r in
                               zip(att, native.coordinate_accepts, rate)))
+        if native.gradient_scales:
+            mult = native.gradient_scale_multipliers
+            print(f"Gradient scales: {native.n_gradient_events} events, "
+                  f"multiplier range [{mult.min():.3g}, {mult.max():.3g}] "
+                  f"(geometric mean "
+                  f"{float(np.exp(np.mean(np.log(mult)))):.3g})")
         print(f"Save target reached: {native.completed}")
         if native.delta_logz_stopped:
             print(f"Delta-logZ stop: yes (delta logZ = "

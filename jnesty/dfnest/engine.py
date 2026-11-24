@@ -29,6 +29,15 @@ Notes on parity-faithful details
   stopping rule is available through ``run(delta_logz=...)``
   (:func:`jnesty.dfnest.levels.delta_log_z_estimate`); it is off unless
   requested and never changes the default sampling path.
+
+An *opt-in* gradient-informed proposal is available through
+``gradient_scales=True``: every ``gradient_interval`` MCMC steps the
+engine computes ``jax.grad`` of the log-likelihood w.r.t. the unit-cube
+row at one live particle, folds the per-coordinate magnitudes into a
+running average, and modulates the per-coordinate ``randh`` proposal
+scale by ``gm(avg)/avg`` (geometric mean one).  The proposal stays in the
+symmetric one-coordinate class, so detailed balance is preserved; the
+gradient is diagnostic only and draws from its own fold-in key stream.
 """
 
 import math
@@ -43,7 +52,9 @@ from . import levels as level_ops
 from .core import (make_block_fn, make_init_fn, make_logl_of_u,
                    make_to_physical, probe_callables)
 from .postprocess import DNestResult, dnest_postprocess
-from .state import DNestConfig, LaneState, LevelBook, resolve_config
+from .state import (DNestConfig, LaneState, LevelBook, derive_scale_multipliers,
+                    resolve_config, update_gradient_magnitude_average,
+                    validate_gradient_options)
 
 __all__ = ['JaxDNestSampler']
 
@@ -57,6 +68,17 @@ __all__ = ['JaxDNestSampler']
 #: for every tested problem and dimension; 800 also stays well inside the
 #: regime the T2 bench found evidence-tight (2000 saves).
 DELTA_LOGZ_MIN_SAVES = 800
+
+#: Fold-in tag deriving the gradient-event key stream from the seed.
+#: ``random.fold_in`` (unlike ``random.split``) does not consume the base
+#: key, so the proposal and host streams — and therefore the default
+#: sampling path — are untouched whether or not the feature is on.
+_GRADIENT_KEY_TAG = 0x5CA1E5
+
+#: Upper bound on gradient events settled at one block boundary; keeps a
+#: very small ``gradient_interval`` from degenerating into a per-step host
+#: round-trip on large blocks.
+_GRADIENT_EVENTS_PER_BLOCK_MAX = 32
 
 
 class JaxDNestSampler:
@@ -107,6 +129,26 @@ class JaxDNestSampler:
     context : pytree or None, optional
         Passed as a second argument to both callables, keeping large data
         out of the compiled kernels.
+    gradient_scales : bool, optional
+        Opt-in gradient-informed per-coordinate proposal scales.  When
+        ``True``, every ``gradient_interval`` MCMC steps the engine
+        computes ``jax.grad`` of the log-likelihood with respect to the
+        unit-cube row at one uniformly chosen live particle and folds
+        ``|d logL / du_i|`` into a per-coordinate running average.  The
+        proposal scale of coordinate ``i`` becomes
+        ``gm(avg) / avg_i`` (normalised to geometric mean one): sensitive
+        coordinates get smaller steps, insensitive ones larger steps.  The
+        proposal stays in the symmetric one-coordinate class, so detailed
+        balance is preserved (the gradient is diagnostic, not part of the
+        proposal distribution).  Default ``False``: the gradient branch is
+        never traced and the sampling path is bit-identical to a run
+        without the argument.
+    gradient_interval : int, optional
+        MCMC steps between gradient computations (default 100).  Gradient
+        events are settled at block boundaries (at most 32 per block);
+        each costs one forward+backward likelihood pass at a single
+        particle, i.e. an amortised ~``1 / gradient_interval`` backward
+        pass per MCMC step.
 
     Notes
     -----
@@ -122,6 +164,13 @@ class JaxDNestSampler:
     divided by ``T`` for evidence and weights, level placement
     untempered); the default ``T = 1`` result and the sampling path are
     untouched by that opt-in API.
+
+    The gradient-informed scales compose orthogonally with
+    ``sample_frequency``: the frequency weights allocate *how often* each
+    coordinate is proposed, the gradient scales *how far* the step
+    reaches.  The gradient events draw from a key stream derived by
+    folding a tag into the seed, never from the proposal stream, so the
+    two features (and the default path) never interact through the RNG.
     """
 
     def __init__(self, loglikelihood, prior_transform, ndim,
@@ -129,7 +178,8 @@ class JaxDNestSampler:
                  thread_steps_factor=10.0, new_level_interval_factor=2.0,
                  save_interval_factor=None, max_num_levels=0, lam=10.0,
                  beta=100.0, compression=math.e, ptol=0.1, seed=None,
-                 device=None, context=None):
+                 device=None, context=None, gradient_scales=False,
+                 gradient_interval=100):
         if not callable(loglikelihood):
             raise TypeError('loglikelihood must be callable')
         if not callable(prior_transform):
@@ -142,6 +192,11 @@ class JaxDNestSampler:
         self.loglikelihood = loglikelihood
         self.prior_transform = prior_transform
         self.context = context
+
+        gradient_scales, gradient_interval = validate_gradient_options(
+            gradient_scales, gradient_interval)
+        self.gradient_scales = gradient_scales
+        self.gradient_interval = gradient_interval
 
         self.config = resolve_config(
             ndim=ndim, num_lanes=num_lanes, num_particles=num_particles,
@@ -176,6 +231,13 @@ class JaxDNestSampler:
             self._rng = np.random.default_rng(seed)
             self._key = random.PRNGKey(seed)
 
+        # Gradient-event key stream for the opt-in gradient-informed
+        # scales: derived by folding a tag into the seed key.  fold_in
+        # does not consume ``self._key``, so the proposal and host streams
+        # are byte-for-byte what they would be without this line; the key
+        # is only ever split when gradient_scales is on.
+        self._grad_key = random.fold_in(self._key, _GRADIENT_KEY_TAG)
+
         # Compiled programs (built after validation so bad callables fail
         # at construction, before any sampling).
         self._logl_of_u = make_logl_of_u(prior_transform, loglikelihood)
@@ -186,6 +248,14 @@ class JaxDNestSampler:
         self._init_fn = make_init_fn(self._logl_of_u, self.config,
                                      self.device)
         self._to_physical = make_to_physical(prior_transform, self.device)
+        # Diagnostic gradient program (d logL / d u at one row); built
+        # only when the feature is on so the default construction never
+        # compiles it.
+        if gradient_scales:
+            self._grad_of_u = jax.jit(
+                jax.grad(self._logl_of_u, argnums=0), device=self.device)
+        else:
+            self._grad_of_u = None
 
         # Run state ------------------------------------------------------
         self._levels = LevelBook(self.config.level_capacity, self._rng,
@@ -210,6 +280,13 @@ class JaxDNestSampler:
         self.n_kills = 0
         self._coord_attempts = np.zeros(self.config.ndim, dtype=np.int64)
         self._coord_accepts = np.zeros(self.config.ndim, dtype=np.int64)
+        # Opt-in gradient-informed scales: the per-coordinate running
+        # average of |d logL / du| and its observation count.  Host-side
+        # state only; the derived multipliers are what reach the device
+        # (as LaneState.grad_scales, re-derived at each block update).
+        self._grad_avg = np.zeros(self.config.ndim, dtype=np.float64)
+        self._n_grad_events = 0
+        self._steps_since_grad = 0
         self._native_result = None
         # Postprocess views at temperature T > 1, keyed by T; dropped
         # whenever the canonical (T = 1) result is recomputed.
@@ -304,6 +381,14 @@ class JaxDNestSampler:
                 raise ValueError(
                     'the initial prior samples produced NaN or +inf '
                     'log-likelihoods; check loglikelihood/prior_transform')
+            if self.gradient_scales:
+                # Attach unit multipliers; the first gradient event
+                # (after gradient_interval steps) replaces them with the
+                # data-derived ones.
+                state = state._replace(
+                    grad_scales=jnp.ones(
+                        (self.config.num_lanes, self.config.ndim),
+                        dtype=jnp.float64))
             self._particles = state
             self._n_like += self.config.total_particles
             if self._track_logl_max:
@@ -520,6 +605,33 @@ class JaxDNestSampler:
                         np.nan)
 
     @property
+    def gradient_magnitudes(self):
+        """Running average of ``|d logL / du_i|`` per coordinate (ndim,).
+
+        Host-side diagnostic state; all zeros before the first finite
+        gradient observation.  Drives :attr:`gradient_scale_multipliers`.
+        """
+        return self._grad_avg.copy()
+
+    @property
+    def gradient_scale_multipliers(self):
+        """Per-coordinate proposal scale multipliers in force (ndim,).
+
+        The multipliers the next block will apply (identical across
+        lanes): geometric mean one over live coordinates, larger for
+        insensitive coordinates, clipped to
+        ``[1 / GRADIENT_SCALES_CAP, GRADIENT_SCALES_CAP]``.  All ones
+        until the first gradient observation lands — i.e. exactly the
+        un-modulated proposal.
+        """
+        return derive_scale_multipliers(self._grad_avg)
+
+    @property
+    def n_gradient_events(self):
+        """Number of finite gradient observations folded in so far."""
+        return self._n_grad_events
+
+    @property
     def levels(self):
         """Dict of the live level arrays (diagnostics view)."""
         book = self._levels
@@ -631,6 +743,70 @@ class JaxDNestSampler:
         self._n_like += cfg.block_steps
         self.n_blocks += 1
         self._dirty = True
+
+        # Opt-in gradient-informed scales: settle the gradient events due
+        # at this block boundary (see _run_gradient_events).  Inert when
+        # gradient_scales is off; consumes only the fold-in key stream.
+        if self.gradient_scales:
+            self._run_gradient_events()
+
+    def _run_gradient_events(self):
+        """Settle gradient events due since the last settlement.
+
+        One *event* computes ``jax.grad`` of the log-likelihood w.r.t. the
+        unit-cube row at one uniformly chosen live particle (chosen with
+        the fold-in key stream, never the proposal stream) and folds
+        ``|d logL / du_i|`` into the running average.  Events are due
+        every ``gradient_interval`` MCMC steps; because the engine only
+        regains host control at block boundaries, they are settled there
+        (catch-up, at most :data:`_GRADIENT_EVENTS_PER_BLOCK_MAX` per
+        block).  Whenever at least one new observation landed, the scale
+        multipliers are re-derived and pushed into ``LaneState.grad_scales``
+        (identical across lanes), taking effect from the next block.
+        """
+        cfg = self.config
+        self._steps_since_grad += cfg.block_steps
+        n_events = min(int(self._steps_since_grad // self.gradient_interval),
+                       _GRADIENT_EVENTS_PER_BLOCK_MAX)
+        if n_events > 0:
+            self._steps_since_grad -= n_events * self.gradient_interval
+            for _ in range(n_events):
+                self._gradient_event()
+            if self._n_grad_events > 0:
+                scales = jnp.asarray(np.broadcast_to(
+                    derive_scale_multipliers(self._grad_avg),
+                    (cfg.num_lanes, cfg.ndim)))
+                self._particles = self._particles._replace(
+                    grad_scales=scales)
+                self._dirty = True
+
+    def _gradient_event(self):
+        """One gradient observation at a uniformly chosen live particle.
+
+        A particle sitting on a ``-inf`` (forbidden-region) likelihood, or
+        a position where the gradient is not finite, is skipped: a single
+        bad observation must not poison the running average that drives
+        the proposal scales.  The forward pass of the gradient counts as
+        one likelihood evaluation in ``n_like`` (the reverse pass adds
+        problem-dependent cost on top of that).
+        """
+        cfg = self.config
+        self._grad_key, key = random.split(self._grad_key)
+        # One flat draw over the (lane, particle) ensemble.
+        flat = int(np.asarray(random.randint(
+            key, (), 0, cfg.total_particles)))
+        lane = flat // cfg.num_particles
+        particle = flat % cfg.num_particles
+        logl_here = float(self._particles.logl[lane, particle])
+        if not math.isfinite(logl_here):
+            return
+        u_row = self._particles.u[lane, particle]
+        grad = np.asarray(self._grad_of_u(u_row, self.context))
+        if not np.all(np.isfinite(grad)):
+            return
+        self._n_like += 1
+        self._grad_avg, self._n_grad_events = update_gradient_magnitude_average(
+            self._grad_avg, np.abs(grad), self._n_grad_events)
 
     def _do_bookkeeping(self, verbose=False):
         """CDNest's do_bookkeeping: level creation, finalisation, logX."""

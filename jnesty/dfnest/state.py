@@ -40,7 +40,9 @@ import numpy as np
 LEVEL_NUM_MAX = 1000
 
 __all__ = ['DNestConfig', 'LaneState', 'LevelBook', 'resolve_config',
-           'LEVEL_NUM_MAX', 'validate_sample_frequency']
+           'LEVEL_NUM_MAX', 'validate_sample_frequency',
+           'validate_gradient_options', 'update_gradient_magnitude_average',
+           'derive_scale_multipliers', 'GRADIENT_SCALES_CAP']
 
 
 # ----------------------------------------------------------------------------
@@ -124,6 +126,145 @@ def validate_sample_frequency(sample_frequency, ndim):
             'never proposed by the built-in perturbation and remain frozen '
             'at their initial values.', stacklevel=2)
     return weights, raw
+
+
+# ----------------------------------------------------------------------------
+# gradient-informed proposal scales
+# ----------------------------------------------------------------------------
+
+#: Hard cap on the per-coordinate scale multipliers produced by
+#: :func:`derive_scale_multipliers`.  A coordinate whose running average
+#: |d logL / du| is zero (the likelihood does not depend on it) gets this
+#: multiplier: its wrapped one-coordinate step is then effectively a
+#: uniform redraw, which costs nothing because such proposals are always
+#: accepted.  The cap keeps the multipliers finite and the geometric-mean
+#: normalisation well-behaved on degenerate problems.
+GRADIENT_SCALES_CAP = 100.0
+
+
+def validate_gradient_options(gradient_scales, gradient_interval):
+    """Validate the gradient-informed proposal-scale options.
+
+    Parameters
+    ----------
+    gradient_scales : bool
+        Whether per-coordinate proposal scales modulated by the running
+        average of ``|d logL / du|`` are enabled.  Only real booleans are
+        accepted (``np.bool_`` included); truthy integers are rejected.
+    gradient_interval : int
+        Number of MCMC steps between gradient computations (at least 1).
+
+    Returns
+    -------
+    gradient_scales : bool
+        The flag as a plain Python ``bool``.
+    gradient_interval : int
+        The interval as a plain Python ``int``.
+
+    Raises
+    ------
+    TypeError, ValueError
+        For non-boolean flags or non-integer / non-positive intervals.
+    """
+    if not isinstance(gradient_scales, (bool, np.bool_)):
+        raise TypeError(
+            f'gradient_scales must be a boolean, got '
+            f'{type(gradient_scales).__name__}')
+    gradient_interval = _require_int('gradient_interval', gradient_interval,
+                                     minimum=1)
+    return bool(gradient_scales), gradient_interval
+
+
+def update_gradient_magnitude_average(avg, mags, count):
+    """Incremental update of the per-coordinate |gradient| running average.
+
+    Parameters
+    ----------
+    avg : ndarray, shape (ndim,)
+        Current running average of ``|d logL / du_i|`` (may be all zeros
+        before the first gradient event).
+    mags : ndarray, shape (ndim,)
+        The newly observed per-coordinate gradient magnitudes
+        ``|d logL / du_i|`` from one particle position.
+    count : int
+        Number of observations already folded into ``avg``.
+
+    Returns
+    -------
+    avg : ndarray, shape (ndim,)
+        The updated running average.
+    count : int
+        ``count + 1``.
+
+    Notes
+    -----
+    Uses the standard streaming mean ``avg += (x - avg) / (count + 1)``,
+    which needs no history buffer and is numerically stable for the
+    many-decade range of gradient magnitudes real problems produce.
+    """
+    avg = np.asarray(avg, dtype=np.float64)
+    mags = np.asarray(mags, dtype=np.float64)
+    if avg.shape != mags.shape:
+        raise ValueError(
+            f'avg and mags must have the same shape, got {avg.shape} '
+            f'and {mags.shape}')
+    if count < 0:
+        raise ValueError(f'count must be >= 0, got {count}')
+    return avg + (mags - avg) / (count + 1.0), int(count) + 1
+
+
+def derive_scale_multipliers(avg, cap=GRADIENT_SCALES_CAP):
+    """Derive per-coordinate proposal scale multipliers from |grad| averages.
+
+    Parameters
+    ----------
+    avg : ndarray, shape (ndim,)
+        Running average of ``|d logL / du_i|`` (non-negative; zeros mean
+        "never saw a gradient in this coordinate").
+    cap : float, optional
+        Bound on every multiplier, in ``[1 / cap, cap]``.
+
+    Returns
+    -------
+    scales : ndarray, shape (ndim,)
+        Positive multipliers with the following properties:
+
+        * the geometric mean over coordinates with ``avg > 0`` is one
+          (the overall step budget is unchanged -- sensitive and
+          insensitive coordinates trade off against each other);
+        * larger average gradients get *smaller* multipliers:
+          ``scales_i = gm(avg) / avg_i``.  For a locally Gaussian
+          likelihood, ``E|d logL/du| ~ 1 / sigma_u``, so this choice
+          equalises the per-coordinate posterior widths;
+        * coordinates with ``avg == 0`` (likelihood-insensitive) get the
+          ``cap`` multiplier and are excluded from the normalisation;
+        * every multiplier is clipped to ``[1 / cap, cap]``.
+
+    Notes
+    -----
+    All-zero input (no gradient event yet) returns all ones, which is
+    exactly the un-modulated proposal.
+    """
+    avg = np.asarray(avg, dtype=np.float64)
+    if avg.ndim != 1:
+        raise ValueError(f'avg must be 1-D, got shape {avg.shape}')
+    if np.any(avg < 0) or not np.all(np.isfinite(avg)):
+        raise ValueError('avg entries must be finite and non-negative')
+    positive = avg > 0
+    if not positive.any():
+        return np.ones_like(avg)
+    log_gm = float(np.mean(np.log(avg[positive])))
+    # log of the average with dead entries neutralised (avoids log(0)
+    # warnings; the where() below discards their values anyway)
+    log_avg_safe = np.log(np.where(positive, avg, 1.0))
+    log_cap = math.log(float(cap))
+    log_scale = np.clip(log_gm - log_avg_safe, -log_cap, log_cap)
+    # dead coordinates get the exact cap (their step is then an
+    # effectively uniform redraw of a coordinate the likelihood ignores);
+    # the final clip makes the documented [1/cap, cap] bound exact even
+    # where exp(log(cap)) rounds above the cap.
+    scales = np.where(positive, np.exp(log_scale), float(cap))
+    return np.clip(scales, 1.0 / float(cap), float(cap))
 
 
 # ----------------------------------------------------------------------------
@@ -316,6 +457,17 @@ class LaneState(NamedTuple):
     block boundary (exactly how CDNest workers keep their private copy of
     ``levels`` between MPI broadcasts).  ``coord_attempts`` /
     ``coord_accepts`` are cumulative totals that are never reset.
+
+    ``grad_scales`` (host shape ``(num_lanes, D)``, per-lane ``(D,)``)
+    holds the per-coordinate proposal scale multipliers of the opt-in
+    gradient-informed proposal (:func:`derive_scale_multipliers`).  It is
+    ``None`` unless the engine was built with ``gradient_scales=True``:
+    ``None`` is a pytree node without leaves, so the default state rides
+    through ``jit``/``vmap``/``lax.scan`` untouched and the compiled
+    default path is numerically bit-identical to the pre-feature code.
+    The running average of gradient magnitudes the multipliers are
+    derived from is host-side engine state: it never enters a compiled
+    program, so it lives on the engine rather than in this tuple.
     """
 
     u: np.ndarray        # (K, D) unit-cube coordinates
@@ -328,6 +480,8 @@ class LaneState(NamedTuple):
     exceeds: np.ndarray  # (C,) int64 per-level exceeds
     coord_attempts: np.ndarray  # (D,) int64 cumulative proposal counts
     coord_accepts: np.ndarray   # (D,) int64 cumulative accepted counts
+    #: (D,) per-coordinate scale multipliers; None disables the feature.
+    grad_scales: object = None
 
 
 # ----------------------------------------------------------------------------

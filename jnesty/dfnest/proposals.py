@@ -32,6 +32,14 @@ subtly wrong:
    independent of the update order, so it is evaluated once per step and
    the two Metropolis updates are then applied in the CDNest's randomly
    chosen order.
+
+On top of the CDNest baseline, :func:`make_lane_step` composes the opt-in
+gradient-informed proposal scales (``state.grad_scales``, see the
+function docstring): per-coordinate multipliers on the ``randh`` step,
+kept in the symmetric one-coordinate proposal class so detailed balance
+is preserved.  The multipliers compose orthogonally with
+``sample_frequency`` — frequency allocates *how often* a coordinate is
+proposed, the scale *how far* the step reaches.
 """
 
 import jax
@@ -222,6 +230,29 @@ def make_lane_step(num_particles, coord_weights, beta, logl_of_u):
     and tiebreaker, whether the step emitted an above-threshold record for
     level construction, and whether the *proposal* likelihood was NaN or
     +inf (a user bug that would otherwise be silently rejected).
+
+    Gradient-informed proposal scales
+    ---------------------------------
+    When the engine was built with ``gradient_scales=True`` the lane state
+    carries per-coordinate scale multipliers in ``state.grad_scales``
+    (host shape ``(num_lanes, D)``, per-lane ``(D,)``; see
+    :mod:`jnesty.dfnest.state`).  The proposal then perturbs coordinate
+    ``coord`` by ``state.grad_scales[coord] * randh(key)`` instead of
+    ``randh(key)``.  The branch is *Python-gated at trace time* on the
+    field being an array: with the default ``None`` the traced program is
+    exactly the pre-feature program, so the default sampling path is
+    bit-identical.
+
+    The scaled proposal stays in the symmetric one-coordinate class:
+    ``randh`` is symmetric about zero and the multiplier is a fixed
+    positive scalar (block-constant, position-independent), so the wrapped
+    step density satisfies ``q(x' | x) == q(x | x')`` and the vacuous
+    Hastings ratio of :func:`update_particle` remains exact — detailed
+    balance w.r.t. the level's uniform-above-threshold distribution is
+    preserved.  The gradient computation that *sets* the multipliers is
+    pure diagnostics: it never enters the proposal distribution, and it
+    consumes randomness from its own key stream, never from the proposal
+    stream.
     """
     weights = jnp.asarray(coord_weights, dtype=jnp.float64)
 
@@ -237,6 +268,9 @@ def make_lane_step(num_particles, coord_weights, beta, logl_of_u):
         row = state.u[which]
         coord = select_coordinate(k_coord, weights)
         h = randh(k_h)
+        if state.grad_scales is not None:
+            # Opt-in gradient-informed scales (traced, block-constant).
+            h = state.grad_scales[coord] * h
         row_new = row.at[coord].set(jnp.mod(row[coord] + h, 1.0))
         logl_prop = logl_of_u(row_new, context)
         tie_prop = jnp.mod(state.tie[which] + random.uniform(k_tie), 1.0)
