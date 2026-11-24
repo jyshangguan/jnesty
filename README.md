@@ -35,8 +35,10 @@ inferences).
   weighted posterior samples (optional `jnesty[nautilus]` extra).
 - **JAX DNest engine** — our GPU port of the CDNest diffusive nested
   sampler: likelihood levels with learned compression, particles that
-  diffuse across levels, per-parameter proposal frequencies, and
-  CDNest-compatible postprocessing (pure JAX, no extra dependencies).
+  diffuse across levels, per-parameter proposal frequencies, opt-in
+  gradient-informed proposal scales (`gradient_scales=True`), and
+  CDNest-compatible postprocessing with temperature views
+  (`results_at_temperature(T)`) (pure JAX, no extra dependencies).
 - **Dynesty result interop** — convert results to dynesty's `Results` object
   for use with its plotting utilities.
 

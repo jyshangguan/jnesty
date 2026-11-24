@@ -314,6 +314,61 @@ and the evidence are unaffected — and `coordinate_attempts` /
 `coordinate_accepts` report the realised frequencies. Zero entries freeze
 a coordinate (with a warning).
 
+### Gradient-informed proposals
+
+The opt-in `gradient_scales=True` enhancement (constructor argument,
+with `gradient_interval=100` MCMC steps between gradient computations)
+modulates the per-coordinate proposal scale using the local shape of
+the likelihood. Every `gradient_interval` steps the engine evaluates
+$\nabla_u \log L$ at one uniformly chosen live particle — one
+forward+backward pass through `jax.grad` — and updates a per-coordinate
+running average $\bar g_i$ of $|\partial\log L/\partial u_i|$. The
+proposal scale of coordinate $i$ is then multiplied by
+
+$$m_i = \mathrm{clip}\!\left(\frac{\mathrm{gm}(\bar g)}{\bar g_i},\ \frac{1}{100},\ 100\right),$$
+
+with the geometric mean taken over live coordinates: sensitive
+coordinates (large average gradient) take *smaller* steps, insensitive
+ones *larger* steps, equalising per-coordinate acceptance at an
+unchanged overall step budget. Dead coordinates (zero average) receive
+the exact cap.
+
+**Why this is safe.** The multiplier is a fixed positive scalar, so the
+perturbation stays inside the *symmetric wrapped one-coordinate class*
+of the particle update: the Hastings ratio remains exactly one, detailed
+balance is preserved, and the evidence is untouched. The gradient is
+diagnostic only — it is drawn from a separate fold-in key stream
+(`random.fold_in` on the seed key, which does not consume it), so the
+proposal randomness is never perturbed, and with `gradient_scales=False`
+(the default) the branch is not even traced: results are bit-identical
+to a run without the argument. The extra cost is honest and measurable:
+`n_like` grows by exactly `n_gradient_events`, an amortised
+$1/\texttt{gradient\_interval}$ backward pass per MCMC step (events are
+settled at block boundaries, at most 32 per block, with catch-up).
+
+`gradient_scales` composes orthogonally with `sample_frequency`: the
+frequency weights allocate *how often* each coordinate is proposed, the
+gradient scales *how far* its step reaches. The live state is exposed
+as the diagnostics `gradient_magnitudes`, `gradient_scale_multipliers`
+and `n_gradient_events` on the sampler (and in `print_summary`).
+
+**Measured efficiency.** On the 137-parameter grid BLR problem this
+engine was built for (3000 saves, 8 lanes, seed 42), switching the
+scales on raised the entropy effective sample size by **17.7%**
+($n_{\mathrm{eff}}$ 333.0 → 391.9) at essentially unchanged acceptance
+(0.723 → 0.725), with a deeper level structure (142 vs 120 levels) and
+multipliers spanning $[0.01, 7.54]$ — the strongly anisotropic regime
+the feature targets. On the 128-dimensional GMRF test problem of the
+{doc}`case_studies` dimension scan, the evidence error stays inside the
+engine's normal band ($-0.91 \to +0.6$ against an analytic truth) with
+an $n_{\mathrm{eff}}$ gain (132.8 → 140.2 in that study; the runnable
+`dev/demo/07_dnest_enhancements.py` reproduces the default arm
+bit-exactly and lands in the same band on the gradient arm, whose exact
+trajectory — unlike the default path — depends on the compilation
+environment). The wall-clock cost on that production run was +42% for
+65,760 gradient events; on CPU the amortised cost is $\sim$1% of
+`n_like`.
+
 ### GPU parallelism
 
 `num_lanes` independent workers — the JAX analogue of CDNest's MPI
@@ -345,6 +400,54 @@ convergence criterion — and there is no per-run `logzerr` (CDNest
 reports none either; repeat runs for evidence scatter). Preserved CDNest
 details include the root-lane-only lagging-particle replacement and the
 single-save-per-block cadence.
+
+**The Dynesty-shaped results bridge.** `to_results()` converts the
+native posterior into a Dynesty-style `Results` object so every shared
+plotting function and the FITS I/O work without gaps. Three fields are
+included purely for that compatibility, with diffusive-NS semantics:
+`nlive` is the ensemble size `num_lanes * num_particles` (a *proxy* —
+diffusive nested sampling has no live-point shrinkage);
+`delta_logZ_trajectory` is an all-NaN array with one entry per saved
+particle (there is no per-iteration convergence trajectory — the run
+length is set by the save budget and the opt-in delta-logZ stop is a
+scalar terminal statistic); and `rwalk_K` is NaN (random-walk steps per
+iteration are a Dynesty-style-engine concept that does not apply here).
+`logvol` keeps the native level-sandwich volumes and `logzerr` is NaN.
+
+### Temperature post-processing
+
+Posterior exploration at a temperature $T \ge 1$ is an opt-in
+*post-processing* view — the sampling itself is never tempered:
+
+- **`results_at_temperature(T)`** returns a full plotting-compatible
+  `Results` view at $T$, and **`posterior_at_temperature(T)`** the
+  corresponding `(points, log_w, log_l)` triple (native save order;
+  the sample coordinates and the returned `log_l` are the untempered
+  saved values — only the weights carry the temperature).
+
+The convention is CDNest's: likelihoods are divided by $T$ for the
+evidence and the weights, $\log w = \log p + \log L / T$, while level
+placement and the prior masses $\log p$ stay untempered. The
+T-ladder semantics follow directly:
+
+- **$T = 1$** is the standard posterior — `results_at_temperature(1)`
+  is bit-identical to `to_results()`, and the default
+  `to_results()`/`posterior()` paths are unchanged by the feature;
+- **$T \to \infty$** approaches the *prior*: the likelihood factor
+  $\exp(\log L/T) \to 1$, so the weights become proportional to the
+  prior masses, $\log Z \to \log\int\pi = 0$ and $H \to 0$ (note the
+  limiting *weights* are the prior masses, which themselves spread over
+  several nats of order-statistic volumes — the max/min weight ratio
+  need not approach one).
+
+Because the tempered view only re-runs the deterministic
+postprocessor, the engine caches the result per temperature: repeated
+calls at the same $T$ are cheap, and a continued run invalidates the
+cache. Temperature values must be real numbers $\ge 1$ (the same
+validation style as `run()`'s). A typical use is a temperature ladder
+($T = 1, 2, 5, 10, \dots$) with one `runplot` per rung to watch the
+posterior flatten toward the prior; the runnable script is
+`dev/demo/07_dnest_enhancements.py`.
 
 ## Importance Nested Sampling (Nautilus)
 

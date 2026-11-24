@@ -19,6 +19,7 @@ straightforward.
 
 methods
 examples
+case_studies
 api
 ```
 
@@ -88,4 +89,5 @@ fig, axes = plotting.cornerplot(r)
 
 - {doc}`methods` — How the sampling and bounding algorithms work
 - {doc}`examples` — Five worked examples (multi-modal, Rosenbrock, high-D, shells, dynamic)
+- {doc}`case_studies` — Practical guides from real inference campaigns (e.g. handling >100 latent parameters)
 - {doc}`api` — Full API reference

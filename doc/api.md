@@ -58,6 +58,58 @@
    :show-inheritance:
 ```
 
+### Opt-in enhancements
+
+Two off-by-default enhancements extend the DNest engine; both leave the
+default sampling path and results bit-identical to a run without the
+arguments.
+
+**Constructor parameters**
+
+- `gradient_scales` (bool, default `False`) — opt-in gradient-informed
+  per-coordinate proposal scales: every `gradient_interval` MCMC steps
+  the engine evaluates the likelihood gradient with respect to the
+  unit-cube coordinates (one `jax.grad` forward+backward pass at a
+  uniformly chosen live particle) and maintains a per-coordinate running
+  average of $|\partial\log L/\partial u_i|$. Each coordinate's proposal
+  scale is then modulated by $\mathrm{gm}(\bar g)/\bar g_i$ (geometric
+  mean normalised to one, so the overall step budget is unchanged):
+  sensitive coordinates take smaller steps, insensitive ones larger
+  steps. The proposal stays in the symmetric wrapped one-coordinate
+  class, so detailed balance and the evidence are untouched; the
+  gradient is diagnostic only, drawn from a separate fold-in key
+  stream. See {doc}`methods` (Gradient-informed proposals) for the
+  mechanism and measured gains.
+- `gradient_interval` (int, default `100`) — MCMC steps between
+  gradient computations. Each event costs one forward+backward pass at
+  a single particle, i.e. an amortised ~$1/\texttt{gradient\_interval}$
+  backward pass per MCMC step; events are settled at block boundaries
+  (at most 32 per block).
+
+The live state is exposed on the sampler as the diagnostics
+`gradient_magnitudes` (running averages),
+`gradient_scale_multipliers` (current multipliers, clipped to
+$[1/100, 100]$) and `n_gradient_events` (event count; `n_like` grows by
+exactly this amount). `gradient_scales` composes orthogonally with
+`sample_frequency` — frequencies allocate how *often* a coordinate is
+proposed, gradient scales how *far* its step reaches.
+
+**Post-processing methods**
+
+- {meth}`results_at_temperature(T) <jnesty.DNestSampler.results_at_temperature>` — a full
+  plotting-compatible {class}`~jnesty.Results` view at temperature
+  $T \ge 1$: the CDNest postprocessing convention divides likelihoods
+  by $T$ for the evidence and weights, while level placement and prior
+  masses stay untempered. $T = 1$ is bit-identical to
+  {meth}`~jnesty.DNestSampler.to_results`; $T \to \infty$ approaches
+  the prior. Results are cached per temperature, so repeated calls at
+  the same $T$ are cheap.
+- {meth}`posterior_at_temperature(T) <jnesty.DNestSampler.posterior_at_temperature>` — the
+  corresponding `(points, log_w, log_l)` triple in native save order:
+  the sample coordinates and untempered log-likelihoods are identical
+  to {meth}`~jnesty.DNestSampler.posterior`, only the weights carry
+  the temperature.
+
 ### JAX DNest Engine
 
 The engine behind :class:`jnesty.DNestSampler`: our JAX port of the CDNest
