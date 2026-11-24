@@ -1,13 +1,15 @@
 # Examples
 
-Five benchmark problems demonstrating JNesty's capabilities. The examples come
+Six worked examples demonstrating JNesty's capabilities. The examples come
 in three flavours: **Dynesty-style** variants (`NestedSampler`,
 `DynamicNestedSampler`), **Nautilus** variants (`NautilusSampler`, our JAX
 importance nested sampler) and **DNest** variants (`DNestSampler`, our JAX
 diffusive nested sampler). The code below is Dynesty-style unless a section is
 explicitly labelled with an engine variant; examples 1 and 2 have all three.
 Examples 3 and 4 additionally have DNest variants; example 5 (dynamic
-sampling) is Dynesty-style only.
+sampling) is Dynesty-style only. Example 6 is DNest-only: the 128-parameter
+study with gradient scales, per-parameter frequencies and temperature
+post-processing.
 
 Each example shows the problem definition, full code, expected results, and
 sample output figures; every runnable demo lives under `dev/demo/`.
@@ -348,3 +350,117 @@ The dynesty-style run plot shows the dynamic allocation of live points:
 At matched likelihood-call budget, dynamic NS achieves ~2-3x higher
 effective sample size (ESS) than static NS, matching the efficiency
 gains reported by dynesty.
+
+---
+
+## 6. Fitting Many Parameters (128D GMRF, DNest)
+
+This example fits the "G1" 128-dimensional GMRF test problem from the
+dimension-scan case study: 128 latent amplitudes on a $(4, 8, 4)$ grid with
+a Gaussian-Markov-random-field second-difference prior (Cholesky-whitened),
+and a likelihood $\mathcal{N}(m, 0.5^2 I)$ with $m = 0.7\,\mathrm{rng}(5)$.
+The analytic truth is $\log Z = -138.552$.
+
+Random-walk nested sampling develops a large positive evidence bias at this
+dimension (see {doc}`case_studies` for the dimension scan and the mechanism),
+while the diffusive engine `DNestSampler` stays accurate — which is why this
+example is DNest-only, and why the case study recommends `DNestSampler` for
+$\ge$ 96 latent dimensions. The example shows the three settings knobs and
+what each changes: `gradient_scales`, `sample_frequency`, and temperature
+post-processing.
+
+**A single enhanced fit** — gradient scales on, parameter 0 proposed at half
+rate, temperature-1 postprocessing:
+
+```python
+import numpy as np
+from jnesty import DNestSampler, plotting
+
+# loglikelihood / prior_transform build the G1 GMRF problem
+# (see dev/demo/07_dnest_enhancements.py for the exact construction)
+
+frequency = np.ones(128)
+frequency[0] = 0.5                  # propose parameter 0 half as often
+
+sampler = DNestSampler(loglikelihood, prior_transform, ndim=128,
+                       num_lanes=8, num_particles=1, seed=42,
+                       gradient_scales=True, sample_frequency=frequency)
+log_z = sampler.run(max_num_saves=1500)
+
+res = sampler.results_at_temperature(1)   # bit-identical to to_results()
+fig, axes = plotting.runplot(res)
+```
+
+**What changes with different settings** — a two-arm comparison plus a
+temperature ladder:
+
+```python
+for gradient_scales in (False, True):
+    sampler = DNestSampler(loglikelihood, prior_transform, ndim=128,
+                           num_lanes=8, num_particles=1, seed=42,
+                           gradient_scales=gradient_scales,
+                           gradient_interval=100)
+    log_z = sampler.run(max_num_saves=1500)
+
+for T in (1, 2, 5, 10):                   # posterior temperature ladder
+    res = sampler.results_at_temperature(T)
+```
+
+**Expected output** (a sample run gives — 1500 saves, seed 42, 8 lanes
+x 1 particle):
+
+```
+gradient_scales=False:
+  logZ = -139.4596  (err -0.91)   n_eff 132.8   acceptance 0.633
+  250 levels   n_like 3,072,008
+
+gradient_scales=True, gradient_interval=100:
+  logZ = -138.4547  (err +0.10)   n_eff 204.5   acceptance 0.645
+  244 levels   n_like 3,102,728  (exactly +30,720 gradient events)
+  multipliers within [0.025, 2.84]
+
+temperature ladder (on the gradient arm, results_at_temperature(T)):
+  T= 1:  logZ -138.45   H 48.62   n_eff 204.5
+  T= 2:  logZ  -86.37   H 25.46   n_eff 110.5
+  T= 5:  logZ  -44.01   H 10.30   n_eff  92.8
+  T=10:  logZ  -25.63   H  5.37   n_eff  60.1
+```
+
+The engine's normal evidence band is $|\mathrm{err}| \le 2$ nats, so both
+arms land well inside it. The gradient arm's exact trajectory is
+compilation-environment dependent (never a bit-exact digest), but its
+accounting is exact: `n_like` grows by exactly `n_gradient_events` and the
+multipliers stay inside $[1/100, 100]$. As $T$ grows the posterior flattens
+toward the prior — logZ rises, H shrinks, and $T \to \infty$ approaches the
+prior weights. Finally, `sample_frequency` changes *how often* a coordinate
+is proposed while `gradient_scales` changes *how far* its step reaches —
+neither touches acceptance ratios, posterior weights or the evidence.
+
+The figures come from the 1500-save multi-setting study; the runnable
+script `dev/demo/07_dnest_enhancements.py` now performs the single
+enhanced fit (gradient scales on, parameter 0 at half rate, temperature-1
+postprocessing).
+
+```{image} _static/example6_comparison.png
+:alt: Bar chart comparison of gradient_scales off vs on on the 128-d G1 problem
+:width: 600px
+:align: center
+```
+
+```{image} _static/example6_runplot_T1.png
+:alt: Run plot of the 128-d G1 fit at temperature T = 1
+:width: 600px
+:align: center
+```
+
+```{image} _static/example6_runplot_T10.png
+:alt: Run plot of the 128-d G1 posterior flattened at temperature T = 10
+:width: 600px
+:align: center
+```
+
+See {doc}`methods` for the details of per-parameter proposal frequencies
+(`sample_frequency`), gradient-informed proposals (`gradient_scales`) and
+temperature post-processing (`results_at_temperature`), {doc}`case_studies`
+for the full dimension scan, and {doc}`api` for the complete `DNestSampler`
+reference.

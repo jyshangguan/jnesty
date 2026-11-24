@@ -41,96 +41,24 @@
 .. autofunction:: jnesty.dynesty._dynamic.combine_saved_and_new
 ```
 
+```{eval-rst}
+.. autofunction:: jnesty.dynesty._dynamic.compute_weights
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynesty._dynamic.jitter_run
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynesty._dynamic.estimate_fresh_batch_size_from_memory
+```
+
 ## NautilusSampler
 
 ```{eval-rst}
 .. autoclass:: jnesty.NautilusSampler
    :members:
    :show-inheritance:
-```
-
-## DNestSampler
-
-```{eval-rst}
-.. autoclass:: jnesty.DNestSampler
-   :members:
-   :inherited-members:
-   :show-inheritance:
-```
-
-### Opt-in enhancements
-
-Two off-by-default enhancements extend the DNest engine; both leave the
-default sampling path and results bit-identical to a run without the
-arguments.
-
-**Constructor parameters**
-
-- `gradient_scales` (bool, default `False`) — opt-in gradient-informed
-  per-coordinate proposal scales: every `gradient_interval` MCMC steps
-  the engine evaluates the likelihood gradient with respect to the
-  unit-cube coordinates (one `jax.grad` forward+backward pass at a
-  uniformly chosen live particle) and maintains a per-coordinate running
-  average of $|\partial\log L/\partial u_i|$. Each coordinate's proposal
-  scale is then modulated by $\mathrm{gm}(\bar g)/\bar g_i$ (geometric
-  mean normalised to one, so the overall step budget is unchanged):
-  sensitive coordinates take smaller steps, insensitive ones larger
-  steps. The proposal stays in the symmetric wrapped one-coordinate
-  class, so detailed balance and the evidence are untouched; the
-  gradient is diagnostic only, drawn from a separate fold-in key
-  stream. See {doc}`methods` (Gradient-informed proposals) for the
-  mechanism and measured gains.
-- `gradient_interval` (int, default `100`) — MCMC steps between
-  gradient computations. Each event costs one forward+backward pass at
-  a single particle, i.e. an amortised ~$1/\texttt{gradient\_interval}$
-  backward pass per MCMC step; events are settled at block boundaries
-  (at most 32 per block).
-
-The live state is exposed on the sampler as the diagnostics
-`gradient_magnitudes` (running averages),
-`gradient_scale_multipliers` (current multipliers, clipped to
-$[1/100, 100]$) and `n_gradient_events` (event count; `n_like` grows by
-exactly this amount). `gradient_scales` composes orthogonally with
-`sample_frequency` — frequencies allocate how *often* a coordinate is
-proposed, gradient scales how *far* its step reaches.
-
-**Post-processing methods**
-
-- {meth}`results_at_temperature(T) <jnesty.DNestSampler.results_at_temperature>` — a full
-  plotting-compatible {class}`~jnesty.Results` view at temperature
-  $T \ge 1$: the CDNest postprocessing convention divides likelihoods
-  by $T$ for the evidence and weights, while level placement and prior
-  masses stay untempered. $T = 1$ is bit-identical to
-  {meth}`~jnesty.DNestSampler.to_results`; $T \to \infty$ approaches
-  the prior. Results are cached per temperature, so repeated calls at
-  the same $T$ are cheap.
-- {meth}`posterior_at_temperature(T) <jnesty.DNestSampler.posterior_at_temperature>` — the
-  corresponding `(points, log_w, log_l)` triple in native save order:
-  the sample coordinates and untempered log-likelihoods are identical
-  to {meth}`~jnesty.DNestSampler.posterior`, only the weights carry
-  the temperature.
-
-### JAX DNest Engine
-
-The engine behind :class:`jnesty.DNestSampler`: our JAX port of the CDNest
-diffusive nested sampler. Importing `jnesty.dfnest` enables JAX float64
-mode (CDNest computes in double precision).
-
-```{eval-rst}
-.. autoclass:: jnesty.dfnest.JaxDNestSampler
-   :members:
-   :show-inheritance:
-```
-
-#### Postprocessing
-
-```{eval-rst}
-.. autofunction:: jnesty.dfnest.dnest_postprocess
-```
-
-```{eval-rst}
-.. autoclass:: jnesty.dfnest.DNestResult
-   :members:
 ```
 
 ### JAX Nautilus Engine
@@ -179,6 +107,18 @@ cache; see `jnesty.nautilus._config`.
    :members:
 ```
 
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.JaxUnitCubeEllipsoidMixture
+   :members:
+   :show-inheritance:
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.nautilus.PhaseShift
+   :members:
+   :show-inheritance:
+```
+
 #### Neural Emulator
 
 ```{eval-rst}
@@ -198,6 +138,70 @@ cache; see `jnesty.nautilus._config`.
 
 ```{eval-rst}
 .. autofunction:: jnesty.nautilus.checkpoint.read_sampler
+```
+
+## DNestSampler
+
+```{eval-rst}
+.. autoclass:: jnesty.DNestSampler
+   :members:
+   :inherited-members:
+   :show-inheritance:
+```
+
+### Opt-in enhancements
+
+The opt-in enhancements (`sample_frequency`, `gradient_scales`,
+`gradient_interval`, `results_at_temperature`, `posterior_at_temperature`)
+are fully documented in the class and method docstrings rendered by the
+autoclass above. `sample_frequency` allocates *how often* a coordinate is
+proposed while `gradient_scales` modulates *how far* its step reaches (they
+compose orthogonally), and with `gradient_scales=True` the `n_like` counter
+grows by exactly `n_gradient_events`. See {doc}`methods` for the mechanisms
+and measured gains, and {doc}`examples` (Example 6).
+
+### JAX DNest Engine
+
+The engine behind :class:`jnesty.DNestSampler`: our JAX port of the CDNest
+diffusive nested sampler. The engine lives in six modules: `state`
+(configuration and validation), `levels` (level hierarchy and statistics),
+`proposals` (the lane-step Metropolis kernel), `core` (callable plumbing /
+compiled block program), `postprocess` (evidence and weights) and `engine`
+(the sampler loop). Importing `jnesty.dfnest` enables JAX float64 mode
+(CDNest computes in double precision).
+
+```{eval-rst}
+.. autoclass:: jnesty.dfnest.JaxDNestSampler
+   :members:
+   :show-inheritance:
+```
+
+#### Configuration and Validation
+
+```{eval-rst}
+.. autoclass:: jnesty.dfnest.state.DNestConfig
+   :members:
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dfnest.state.validate_sample_frequency
+```
+
+#### Level Statistics
+
+```{eval-rst}
+.. autofunction:: jnesty.dfnest.levels.delta_log_z_estimate
+```
+
+#### Postprocessing
+
+```{eval-rst}
+.. autofunction:: jnesty.dfnest.dnest_postprocess
+```
+
+```{eval-rst}
+.. autoclass:: jnesty.dfnest.DNestResult
+   :members:
 ```
 
 ## Results
@@ -257,12 +261,12 @@ first argument and return `(fig, axes)`. For a `NautilusSampler` or
 .. autofunction:: jnesty.diagnostics
 ```
 
-## Core Sampling Loop
+## Dynesty-Style Engine (jnesty.dynesty)
 
-The core loop and its pluggable pieces live in the `jnesty.dynesty` engine
-subpackage: `core`, `internal_samplers`, `bounding`, `multi_ellipsoid` and
-`_dynamic`. The public classes in `jnesty.dynesty_sampler` are thin wrappers
-around it.
+The dynesty-style engine and its pluggable pieces live in the
+`jnesty.dynesty` subpackage: `core`, `internal_samplers`, `bounding`,
+`multi_ellipsoid` and `_dynamic`. The public classes in
+`jnesty.dynesty_sampler` are thin wrappers around it.
 
 ### Configuration
 
@@ -290,7 +294,17 @@ around it.
 .. autofunction:: jnesty.dynesty.core.estimate_batch_size_from_memory
 ```
 
-## Bounding Methods
+### Compilation Cache
+
+```{eval-rst}
+.. autofunction:: jnesty.dynesty.core.clear_compiled_units
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynesty.core.compiled_units_size
+```
+
+### Bounding Methods
 
 ```{eval-rst}
 .. autoclass:: jnesty.dynesty.bounding.Bound
@@ -320,7 +334,7 @@ around it.
 .. autofunction:: jnesty.dynesty.bounding.get_bound
 ```
 
-## Internal Samplers
+### Internal Samplers
 
 ```{eval-rst}
 .. autoclass:: jnesty.dynesty.internal_samplers.InternalSampler
@@ -335,34 +349,26 @@ around it.
 ```
 
 ```{eval-rst}
+.. autoclass:: jnesty.dynesty.internal_samplers.HSliceSampler
+   :members:
+   :show-inheritance:
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.dynesty.internal_samplers.validate_rwalk_direction_weights
+```
+
+```{eval-rst}
 .. autofunction:: jnesty.dynesty.internal_samplers.get_sampler
 ```
 
-### Queue Mode
+#### Queue Mode
 
 ```{eval-rst}
 .. autofunction:: jnesty.dynesty.internal_samplers.vmap_queue_refill
 ```
 
-## Utilities
-
-```{eval-rst}
-.. autofunction:: jnesty.utils.randsphere
-```
-
-```{eval-rst}
-.. autofunction:: jnesty.utils.logsubexp
-```
-
-```{eval-rst}
-.. autofunction:: jnesty.utils.logvol_prefactor
-```
-
-```{eval-rst}
-.. autofunction:: jnesty.utils.mean_and_cov
-```
-
-## Multi-Ellipsoid Fitting
+### Multi-Ellipsoid Fitting
 
 ```{eval-rst}
 .. autofunction:: jnesty.dynesty.multi_ellipsoid.fit_multi_ellipsoid
@@ -386,4 +392,22 @@ around it.
 
 ```{eval-rst}
 .. autofunction:: jnesty.dynesty.multi_ellipsoid.contains_all
+```
+
+## Utilities
+
+```{eval-rst}
+.. autofunction:: jnesty.utils.randsphere
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.utils.logsubexp
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.utils.logvol_prefactor
+```
+
+```{eval-rst}
+.. autofunction:: jnesty.utils.mean_and_cov
 ```

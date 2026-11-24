@@ -362,10 +362,12 @@ the feature targets. On the 128-dimensional GMRF test problem of the
 {doc}`case_studies` dimension scan, the evidence error stays inside the
 engine's normal band ($-0.91 \to +0.6$ against an analytic truth) with
 an $n_{\mathrm{eff}}$ gain (132.8 → 140.2 in that study; the runnable
-`dev/demo/07_dnest_enhancements.py` reproduces the default arm
-bit-exactly and lands in the same band on the gradient arm, whose exact
-trajectory — unlike the default path — depends on the compilation
-environment). The wall-clock cost on that production run was +42% for
+`dev/demo/07_dnest_enhancements.py` runs the enhanced configuration
+(gradient scales on, one parameter slowed to half rate) and lands in
+the same band, its exact trajectory — unlike the default path —
+depending on the compilation environment; the off/on comparison and its
+numbers are shown in {doc}`examples`). The wall-clock cost on that
+production run was +42% for
 65,760 gradient events; on CPU the amortised cost is $\sim$1% of
 `n_like`.
 
@@ -446,8 +448,10 @@ calls at the same $T$ are cheap, and a continued run invalidates the
 cache. Temperature values must be real numbers $\ge 1$ (the same
 validation style as `run()`'s). A typical use is a temperature ladder
 ($T = 1, 2, 5, 10, \dots$) with one `runplot` per rung to watch the
-posterior flatten toward the prior; the runnable script is
-`dev/demo/07_dnest_enhancements.py`.
+posterior flatten toward the prior; the ladder's numbers and runplots
+are shown in {doc}`examples`, and the runnable
+`dev/demo/07_dnest_enhancements.py` exercises the $T = 1$ view
+(`results_at_temperature(1)`, bit-identical to `to_results()`).
 
 ## Importance Nested Sampling (Nautilus)
 

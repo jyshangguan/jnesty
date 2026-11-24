@@ -1,46 +1,22 @@
 #!/usr/bin/env python
 """
-Demo 7: DNest Enhancements (gradient-informed proposals + temperature)
+Demo 7: DNest enhancements -- one enhanced G1 fit.
 
-The 128-dimensional GMRF problem "G1" of the T1c Phase-1 evidence study
-(grid shape (4, 8, 4) second-difference precision, sigma_z = 1, likelihood
-N(z; m, 0.5^2 I) with m = 0.7 * default_rng(5), analytic logZ).  The
-construction is recreated inline (verified bit-identical to the blr_mc
-``gmrf_precision`` output; truth guard below).
-
-Two arms at the exact T1c dfnest configuration (8 lanes x 1 particle,
-thread_steps_factor 1.0, new/save-level interval factors 2.0, 1500 saves,
-seed 42):
-
-* ``off``  -- gradient_scales=False (the default; reproduces the T1c
-              dfnest reference logZ = -139.4596, err = -0.91
-              bit-exactly on any machine)
-* ``on``   -- gradient_scales=True, gradient_interval=100.  The task_007
-              study measured err +0.60 / n_eff 132.8 -> 140.2; this
-              demo's CPU run lands at err +0.10 / n_eff 204.5.  The
-              gradient arm's exact trajectory depends on the
-              compilation environment (the committed test asserts the
-              |err| <= 2 evidence band, not a digest), but its
-              accounting is exact: n_like grows by precisely
-              n_gradient_events (30720 here) and the multipliers stay
-              inside [1/100, 100].
-
-then a temperature ladder (T = 1, 2, 5, 10) through
-``results_at_temperature`` on the gradient-scales arm, one runplot per
-rung: the CDNest convention (logl / T for evidence and weights, level
-placement untempered) flattens the posterior toward the prior as T
-grows (logZ rises toward the prior total mass, H shrinks).
-
-JAX float64 (x64) is enabled at import BEFORE the problem constants are
-built, and the demo defaults to CPU (JAX_PLATFORMS=cpu, overridable):
-those are the reference-number conventions of the study.
+G1 is the 128-dimensional GMRF problem of the T1c Phase-1 evidence study
+(grid (4, 8, 4) second-difference precision, sigma_z = 1, likelihood
+N(z; m, 0.5^2 I) with m = 0.7 * default_rng(5)); its analytic logZ is
+recreated inline and guarded below.  One enhanced fit:
+``gradient_scales=True``, parameter 0 slowed to half rate via
+``sample_frequency``, temperature-1 postprocessing.  The historical
+off/on + temperature-ladder comparison this demo was reduced from is
+documented in ``doc/examples.md`` (Example 6).
 
 Usage:
     python 07_dnest_enhancements.py [--saves 1500] [--seed 42]
-        [--gradient-interval 100] [--temperatures 1,2,5,10]
+        [--frequency 0.5]
 
 Output (in output_07_dnest_enhancements/):
-    summary.json, comparison.png, runplot_T*.png
+    summary.json, runplot_T1.png
 """
 
 import json
@@ -143,104 +119,19 @@ def build_g1():
 
 
 # ============================================================================
-# Arms
+# One enhanced run
 # ============================================================================
-def run_arm(loglike, prior, saves, seed, gradient_scales,
-            gradient_interval):
-    """One G1 arm at the T1c dfnest configuration."""
-    sampler = DNestSampler(
-        loglike, prior, ndim=128, num_lanes=8, num_particles=1,
-        thread_steps_factor=1.0, new_level_interval_factor=2.0,
-        save_interval_factor=2.0, seed=seed,
-        gradient_scales=gradient_scales,
-        gradient_interval=gradient_interval)
-    t0 = time.perf_counter()
-    logz = sampler.run(max_num_saves=saves)
-    wall = time.perf_counter() - t0
-
-    record = dict(gradient_scales=bool(gradient_scales),
-                  logz=float(logz), logz_err=float(logz - G1_TRUTH),
-                  n_eff=float(sampler.n_eff),
-                  acceptance=float(sampler.acceptance_rate),
-                  n_like=int(sampler.n_like), n_saves=int(sampler.n_saves),
-                  n_levels=int(sampler.n_levels),
-                  n_steps=int(sampler.n_steps), wall_s=wall)
-    if gradient_scales:
-        mult = np.asarray(sampler.gradient_scale_multipliers)
-        record.update(n_gradient_events=int(sampler.n_gradient_events),
-                      multiplier_min=float(mult.min()),
-                      multiplier_max=float(mult.max()))
-    return sampler, record
-
-
-def efficiency_figure(records, outdir):
-    """Off-vs-on bars: evidence error, n_eff, acceptance, wall."""
-    arms = ['off', 'on']
-    colors = ['#BBBBBB', '#009988']
-    panels = [('logz_err', r'$\log Z - \log Z_{\rm truth}$',
-               'Evidence error (grey band: |err| <= 2)', '{:+.2f}'),
-              ('n_eff', 'n_eff',
-               'Entropy effective sample size', '{:.1f}'),
-              ('acceptance', 'acceptance',
-               'MCMC acceptance rate', '{:.3f}'),
-              ('wall_s', 'wall (s)', 'Wall clock', '{:.0f}')]
-    fig, axes = plt.subplots(1, 4, figsize=(13.5, 3.4))
-    for ax, (key, ylabel, title, fmt) in zip(axes, panels):
-        vals = [r[key] for r in records]
-        ax.bar(range(2), vals, 0.55, color=colors)
-        span = max(abs(v) for v in vals) or 1.0
-        for i, v in enumerate(vals):
-            ax.text(i, v + (0.06 * span if v >= 0 else -0.12 * span),
-                    fmt.format(v), ha='center', fontsize=9)
-        if key == 'logz_err':
-            ax.axhspan(-2, 2, color='0.9', zorder=0)
-            ax.axhline(0, color='k', lw=0.8)
-        if key == 'acceptance':
-            ax.set_ylim(0, 1)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title, fontsize=10)
-        ax.set_xticks(range(2))
-        ax.set_xticklabels([f'gradient_scales={a}' for a in arms],
-                           fontsize=9)
-    fig.suptitle('G1 128-d GMRF: gradient-informed proposal scales '
-                 '(same seed and save budget)')
-    fig.tight_layout()
-    fig.savefig(os.path.join(outdir, 'comparison.png'), dpi=150)
-    plt.close(fig)
-
-
-def temperature_ladder(sampler, temperatures, outdir):
-    """runplot at each T through results_at_temperature (per-T cached)."""
-    rows = []
-    for T in temperatures:
-        res = sampler.results_at_temperature(T)
-        fig, _ = plotting.runplot(res)
-        fig.suptitle(f'G1 128-d at temperature T = {T:g}', y=1.02)
-        fig.savefig(os.path.join(outdir, f'runplot_T{T:g}.png'),
-                    dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        rows.append(dict(T=float(T), logz=float(res['logz']),
-                         information=float(res['information']),
-                         n_eff=float(res['n_eff'])))
-        print(f"  T = {T:<5g} logZ {res['logz']:>10.4f}   H "
-              f"{res['information']:>7.4f}   n_eff {res['n_eff']:>6.1f}",
-              flush=True)
-    return rows
-
-
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--saves', type=int, default=1500,
-                        help='save budget per arm (default 1500)')
+                        help='save budget (default 1500)')
     parser.add_argument('--seed', type=int, default=42,
                         help='run seed (default 42)')
-    parser.add_argument('--gradient-interval', type=int, default=100,
-                        help='MCMC steps between gradient events')
-    parser.add_argument('--temperatures', type=str, default='1,2,5,10',
-                        help='comma-separated temperature ladder')
+    parser.add_argument('--frequency', type=float, default=0.5,
+                        help='proposal weight of parameter 0; '
+                             'all others get weight 1.0')
     args = parser.parse_args()
-    temperatures = [float(t) for t in args.temperatures.split(',')]
 
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           'output_07_dnest_enhancements')
@@ -251,61 +142,75 @@ def main():
     print(f'G1 128-d GMRF: analytic logZ = {truth:.4f}')
     print(f'(construction guard OK; x64 = {jax.config.jax_enable_x64})\n')
 
-    records = []
-    samplers = {}
-    for gradient_scales in (False, True):
-        label = 'on' if gradient_scales else 'off'
-        print(f'running arm gradient_scales={label} '
-              f'({args.saves} saves, seed {args.seed}) ...', flush=True)
-        sampler, record = run_arm(
-            loglike, prior, args.saves, args.seed, gradient_scales,
-            args.gradient_interval)
-        samplers[label] = sampler
-        records.append(record)
-        extra = ''
-        if gradient_scales:
-            extra = (f"  events {record['n_gradient_events']}, "
-                     f"multipliers [{record['multiplier_min']:.3g}, "
-                     f"{record['multiplier_max']:.3g}]")
-        print(f"  logZ {record['logz']:.4f} (err "
-              f"{record['logz_err']:+.2f})  n_eff {record['n_eff']:.1f}  "
-              f"acc {record['acceptance']:.3f}  "
-              f"n_like {record['n_like']}{extra}\n", flush=True)
+    frequency = np.ones(128)
+    frequency[0] = args.frequency
+    print(f'sample_frequency: parameter 0 weight {args.frequency:g} '
+          f'(others 1.0) -> ~{args.frequency:g}x the uniform proposal '
+          f'rate\n', flush=True)
 
-    print('=== Efficiency: gradient_scales off vs on '
-          '(same seed, same budget) ===')
-    header = (f"{'arm':<5}{'logZ':>11}{'err':>7}{'n_eff':>8}"
-              f"{'acc':>7}{'n_like':>10}{'levels':>8}{'wall_s':>9}")
-    print(header)
-    for record in records:
-        print(f"{'on' if record['gradient_scales'] else 'off':<5}"
-              f"{record['logz']:>11.4f}{record['logz_err']:>+7.2f}"
-              f"{record['n_eff']:>8.1f}{record['acceptance']:>7.3f}"
-              f"{record['n_like']:>10d}{record['n_levels']:>8d}"
-              f"{record['wall_s']:>9.1f}")
+    print(f'running one enhanced fit ({args.saves} saves, '
+          f'seed {args.seed}) ...', flush=True)
+    sampler = DNestSampler(
+        loglike, prior, ndim=128, num_lanes=8, num_particles=1,
+        thread_steps_factor=1.0, new_level_interval_factor=2.0,
+        save_interval_factor=2.0, seed=args.seed,
+        gradient_scales=True, gradient_interval=100,
+        sample_frequency=frequency)
+    t0 = time.perf_counter()
+    logz = sampler.run(max_num_saves=args.saves)
+    wall = time.perf_counter() - t0
 
-    efficiency_figure(records, outdir)
+    mult = np.asarray(sampler.gradient_scale_multipliers)
+    att = np.asarray(sampler.coordinate_attempts)
+    ratio = att[0] / att[1:].mean()
+    record = dict(
+        logz=float(logz), logz_err=float(logz - G1_TRUTH),
+        n_eff=float(sampler.n_eff),
+        acceptance=float(sampler.acceptance_rate),
+        n_like=int(sampler.n_like), n_saves=int(sampler.n_saves),
+        n_levels=int(sampler.n_levels), n_steps=int(sampler.n_steps),
+        n_gradient_events=int(sampler.n_gradient_events),
+        multiplier_min=float(mult.min()),
+        multiplier_max=float(mult.max()),
+        attempts_param0=int(att[0]),
+        attempts_mean_others=float(att[1:].mean()),
+        attempts_ratio=float(ratio),
+        wall_s=wall)
 
-    print('\n=== Temperature ladder (gradient-scales arm; '
-          'results_at_temperature, per-T cached) ===')
-    ladder = temperature_ladder(samplers['on'], temperatures, outdir)
+    print('\n=== Enhanced run record ===')
+    print(f"logZ {record['logz']:.4f} (err {record['logz_err']:+.2f})  "
+          f"n_eff {record['n_eff']:.1f}  acc {record['acceptance']:.3f}")
+    print(f"n_like {record['n_like']}  n_levels {record['n_levels']}  "
+          f"n_gradient_events {record['n_gradient_events']}  "
+          f"multipliers [{record['multiplier_min']:.3g}, "
+          f"{record['multiplier_max']:.3g}]  "
+          f"wall {record['wall_s']:.1f} s")
+    print(f"parameter 0 attempted {record['attempts_param0']} times vs "
+          f"mean {record['attempts_mean_others']:.1f} of the others "
+          f"(ratio {record['attempts_ratio']:.2f})")
 
-    print('\n=== Summary ===')
-    print(f"truth logZ = {truth:.4f}")
-    for record in records:
-        label = 'on' if record['gradient_scales'] else 'off'
-        print(f"gradient_scales {label}: logZ {record['logz']:.4f} "
-              f"(err {record['logz_err']:+.2f}), n_eff "
-              f"{record['n_eff']:.1f}, wall {record['wall_s']:.0f} s")
-    print(f"wrote {outdir}/summary.json, comparison.png, "
-          f"runplot_T*.png ({len(ladder)} rungs)")
+    print('\n=== Temperature T = 1 postprocessing '
+          '(results_at_temperature) ===')
+    res = sampler.results_at_temperature(1)
+    assert res['logz'] == logz  # T=1 view is bit-identical to run()'s logz
+    print(f"logZ {res['logz']:.4f}  H {res['information']:.4f}  "
+          f"n_eff {res['n_eff']:.1f}")
+    temperature_1 = dict(logz=float(res['logz']),
+                         information=float(res['information']),
+                         n_eff=float(res['n_eff']))
+    fig, _ = plotting.runplot(res)
+    fig.suptitle('G1 128-d at temperature T = 1', y=1.02)
+    fig.savefig(os.path.join(outdir, 'runplot_T1.png'), dpi=150,
+                bbox_inches='tight')
+    plt.close(fig)
 
     with open(os.path.join(outdir, 'summary.json'), 'w') as fh:
         json.dump(dict(problem='G1 128-d GMRF (T1c Phase-1)',
                        truth=truth, saves=args.saves, seed=args.seed,
-                       gradient_interval=args.gradient_interval,
-                       arms=records, temperature_ladder=ladder),
+                       frequency=args.frequency, run=record,
+                       temperature_1=temperature_1),
                   fh, indent=1)
+    print(f'\nwrote {outdir}/summary.json, runplot_T1.png')
 
 
 if __name__ == '__main__':

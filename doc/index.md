@@ -88,6 +88,6 @@ fig, axes = plotting.cornerplot(r)
 ## Next Steps
 
 - {doc}`methods` — How the sampling and bounding algorithms work
-- {doc}`examples` — Five worked examples (multi-modal, Rosenbrock, high-D, shells, dynamic)
+- {doc}`examples` — Six worked examples (multi-modal, Rosenbrock, high-D, shells, dynamic, 128-parameter DNest)
 - {doc}`case_studies` — Practical guides from real inference campaigns (e.g. handling >100 latent parameters)
 - {doc}`api` — Full API reference

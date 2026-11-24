@@ -125,7 +125,9 @@ tuning), and `bound='none'` with 2000-step walks *reverses* the bias to
 
 The 128-dimensional member of this family, with the exact GMRF
 construction and the dfnest configuration above, runs as
-`dev/demo/07_dnest_enhancements.py`.
+`dev/demo/07_dnest_enhancements.py` (with the opt-in gradient scales
+and one slowed parameter enabled; the off/on and temperature comparison
+is in {doc}`examples`).
 
 ### Figures and data
 
